@@ -5,6 +5,7 @@ const downloadBtn = document.getElementById("downloadBtn");
 const dropHint = document.getElementById("dropHint");
 const imageWrap = document.getElementById("imageWrap");
 const preview = document.getElementById("preview");
+const initialPreviewText = document.getElementById("initialPreviewText");
 const cropBox = document.getElementById("cropBox");
 const applyCropBtn = document.getElementById("applyCropBtn");
 const clearCropBtn = document.getElementById("clearCropBtn");
@@ -20,8 +21,10 @@ const zoomLevelEl = document.getElementById("zoomLevel");
 const resizeW = document.getElementById("resizeW");
 const resizeH = document.getElementById("resizeH");
 const lockAspect = document.getElementById("lockAspect");
+const enhancement = document.getElementById("enhancement");
 const statusEl = document.getElementById("status");
 const historyList = document.getElementById("historyList");
+const initialPreviewSrc = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='420' viewBox='0 0 640 420'%3E%3Crect width='640' height='420' fill='%23000'/%3E%3C/svg%3E";
 
 const SLIDER_LABELS = {
   brightness: "Brightness",
@@ -76,6 +79,12 @@ let state = {
   sliderBaseline: neutralSliderValues(), // value already baked into the current source, per slider
   historySliderValues: {}, // stepId -> the absolute slider values baked in as of that step
 };
+
+preview.src = initialPreviewSrc;
+preview.classList.add("empty-preview");
+initialPreviewText.hidden = false;
+imageWrap.hidden = false;
+dropHint.hidden = true;
 
 function neutralSliderValues() {
   return Object.fromEntries(sliders.map((s) => [s.id, 1]));
@@ -303,6 +312,31 @@ function requestPreview() {
   }, 150);
 }
 
+async function downloadCurrentImage() {
+  if (!state.imageId) return;
+
+  setStatus("Preparing download...");
+  const params = currentParams();
+  delete params.preview;
+  const res = await fetch(`/process/${state.imageId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    setStatus("Download failed");
+    return;
+  }
+
+  const blobUrl = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = "edited-image.png";
+  link.click();
+  URL.revokeObjectURL(blobUrl);
+  setStatus("");
+}
+
 let adjustDebounceTimer = null;
 
 function commitAdjustments() {
@@ -364,6 +398,8 @@ fileInput.addEventListener("change", async () => {
   };
 
   applySliderValues(neutralSliderValues());
+  preview.classList.remove("empty-preview");
+  initialPreviewText.hidden = true;
   resizeW.value = data.width;
   resizeH.value = data.height;
   cropBox.hidden = true;
@@ -380,7 +416,7 @@ fileInput.addEventListener("change", async () => {
   applyCropBtn.disabled = false;
   clearCropBtn.disabled = false;
   applyResizeBtn.disabled = false;
-  downloadBtn.hidden = true;
+  downloadBtn.hidden = false;
   setStatus("");
 });
 
@@ -445,6 +481,11 @@ saveBtn.addEventListener("click", async () => {
   state.currentStepId = null;
   renderHistory();
   setStatus(`Saved as ${data.filename}`);
+});
+
+downloadBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  downloadCurrentImage();
 });
 
 // --- Crop drag selection ---
@@ -610,6 +651,7 @@ applyCropBtn.addEventListener("click", () => {
   resizeH.value = h;
   state.aspectRatio = w / h;
   cropBox.hidden = true;
+  resetZoomState();
   commitStep({ crop: { x, y, w, h } }, `Crop ${w}×${h}`);
 });
 
@@ -635,5 +677,10 @@ applyResizeBtn.addEventListener("click", () => {
   const w = parseInt(resizeW.value, 10);
   const h = parseInt(resizeH.value, 10);
   if (!w || !h) return;
-  commitStep({ resize: { w, h } }, `Resize ${w}×${h}`);
+  const algorithm = enhancement.value;
+  const label = algorithm === "none"
+    ? `Resize ${w}×${h}`
+    : `Resize ${w}×${h} + ${enhancement.options[enhancement.selectedIndex].text}`;
+  commitStep({ resize: { w, h }, enhancement: algorithm }, label);
+  enhancement.value = "none";
 });

@@ -124,6 +124,25 @@ body {
   margin: 0;
 }
 
+#preview.empty-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+.initial-preview-text {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: clamp(16px, 2vw, 24px);
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .image-wrap {
   touch-action: none;
 }
