@@ -161,6 +161,16 @@
           <label class="inline">W <input type="number" id="resizeW" min="1"></label>
           <label class="inline">H <input type="number" id="resizeH" min="1"></label>
           <label class="checkbox"><input type="checkbox" id="lockAspect" checked> Lock aspect ratio</label>
+          <label>Enhancement
+            <select id="enhancement">
+              <option value="none">None</option>
+              <option value="clahe">CLAHE</option>
+              <option value="filter2d">Filter2D</option>
+              <option value="bilateral">Bilateral Filter</option>
+              <option value="unsharp">Unsharp Mask</option>
+              <option value="detail">Detail Enhance</option>
+            </select>
+          </label>
           <button id="applyResizeBtn" class="btn icon-btn secondary" title="Apply resize" aria-label="Apply resize" disabled>
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
           </button>

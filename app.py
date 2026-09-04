@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, request, render_template, send_file, abort
-from PIL import Image, ImageEnhance, ImageOps
+import cv2
+import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -138,6 +140,37 @@ def normalize_orientation(img: Image.Image) -> Image.Image:
     return corrected
 
 
+def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
+    if algorithm == "none":
+        return img
+
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    rgb = np.array(img.convert("RGB"))
+
+    if algorithm == "clahe":
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+        lightness, a_channel, b_channel = cv2.split(lab)
+        lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(lightness)
+        enhanced = cv2.cvtColor(cv2.merge((lightness, a_channel, b_channel)), cv2.COLOR_LAB2RGB)
+    elif algorithm == "filter2d":
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
+        enhanced = cv2.filter2D(rgb, -1, kernel)
+    elif algorithm == "bilateral":
+        enhanced = cv2.bilateralFilter(rgb, 9, 75, 75)
+    elif algorithm == "unsharp":
+        blurred = cv2.GaussianBlur(rgb, (0, 0), 2.0)
+        enhanced = cv2.addWeighted(rgb, 1.6, blurred, -0.6, 0)
+    elif algorithm == "detail":
+        enhanced = cv2.detailEnhance(rgb, sigma_s=10, sigma_r=0.15)
+    else:
+        return img
+
+    result = Image.fromarray(enhanced)
+    if alpha is not None:
+        result.putalpha(alpha)
+    return result
+
+
 def process_image(source: Path, params: dict) -> Image.Image:
     img = Image.open(source)
     img = normalize_orientation(img)
@@ -155,6 +188,8 @@ def process_image(source: Path, params: dict) -> Image.Image:
     resize = params.get("resize")
     if resize and resize.get("w") and resize.get("h"):
         img = img.resize((int(resize["w"]), int(resize["h"])), Image.LANCZOS)
+
+    img = apply_enhancement(img, params.get("enhancement", "none"))
 
     brightness = float(params.get("brightness", 1.0))
     contrast = float(params.get("contrast", 1.0))

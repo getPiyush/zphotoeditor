@@ -21,6 +21,7 @@ const zoomLevelEl = document.getElementById("zoomLevel");
 const resizeW = document.getElementById("resizeW");
 const resizeH = document.getElementById("resizeH");
 const lockAspect = document.getElementById("lockAspect");
+const enhancement = document.getElementById("enhancement");
 const statusEl = document.getElementById("status");
 const historyList = document.getElementById("historyList");
 const initialPreviewSrc = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='420' viewBox='0 0 640 420'%3E%3Crect width='640' height='420' fill='%23000'/%3E%3C/svg%3E";
@@ -676,5 +677,10 @@ applyResizeBtn.addEventListener("click", () => {
   const w = parseInt(resizeW.value, 10);
   const h = parseInt(resizeH.value, 10);
   if (!w || !h) return;
-  commitStep({ resize: { w, h } }, `Resize ${w}×${h}`);
+  const algorithm = enhancement.value;
+  const label = algorithm === "none"
+    ? `Resize ${w}×${h}`
+    : `Resize ${w}×${h} + ${enhancement.options[enhancement.selectedIndex].text}`;
+  commitStep({ resize: { w, h }, enhancement: algorithm }, label);
+  enhancement.value = "none";
 });
