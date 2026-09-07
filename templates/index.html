@@ -43,7 +43,7 @@
         <span class="crop-handle handle-w"></span>
       </div>
     </div>
-    <p id="status" class="status"></p>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
   </section>
 
   <aside class="panel">
@@ -169,6 +169,7 @@
               <option value="bilateral">Bilateral Filter</option>
               <option value="unsharp">Unsharp Mask</option>
               <option value="detail">Detail Enhance</option>
+              <option value="realesrgan_x4plus">RealESRGAN x4plus (slow)</option>
             </select>
           </label>
           <button id="applyResizeBtn" class="btn icon-btn secondary" title="Apply resize" aria-label="Apply resize" disabled>
