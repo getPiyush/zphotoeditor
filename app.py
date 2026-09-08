@@ -1,6 +1,9 @@
 import io
 import math
+import os
 import shutil
+import threading
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +29,11 @@ app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
 # In-memory edit history per image_id: [{"id", "timestamp", "filename", "label"}, ...]
 # The last entry (if any) is always the current source image for further edits.
 HISTORY: dict[str, list[dict]] = {}
+REALESRGAN_MODEL_URL = (
+    "https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth"
+)
+_realesrgan_lock = threading.Lock()
+_realesrgan_upsampler = None
 
 
 def allowed_file(filename: str) -> bool:
@@ -140,6 +148,62 @@ def normalize_orientation(img: Image.Image) -> Image.Image:
     return corrected
 
 
+def get_realesrgan_upsampler():
+    global _realesrgan_upsampler
+    if _realesrgan_upsampler is not None:
+        return _realesrgan_upsampler
+
+    with _realesrgan_lock:
+        if _realesrgan_upsampler is not None:
+            return _realesrgan_upsampler
+        try:
+            import sys
+            import torch
+            import torchvision.transforms.functional as functional
+
+            # BasicSR 1.4.2 imports this module name removed by newer TorchVision.
+            sys.modules.setdefault("torchvision.transforms.functional_tensor", functional)
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+            from realesrgan import RealESRGANer
+        except ImportError as exc:
+            raise RuntimeError(f"Real-ESRGAN dependency import failed: {exc}") from exc
+
+        model_path = Path(
+            os.environ.get("REALESRGAN_MODEL_PATH", BASE_DIR / "models" / "RealESRGAN_x4plus.pth")
+        )
+        if not model_path.exists():
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                urllib.request.urlretrieve(REALESRGAN_MODEL_URL, model_path)
+            except OSError as exc:
+                model_path.unlink(missing_ok=True)
+                raise RuntimeError(f"Could not download Real-ESRGAN weights: {exc}") from exc
+
+        model = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=23,
+            num_grow_ch=32,
+            scale=4,
+        )
+        _realesrgan_upsampler = RealESRGANer(
+            scale=4,
+            model_path=str(model_path),
+            model=model,
+            tile=0,
+            tile_pad=10,
+            pre_pad=0,
+            half=torch.cuda.is_available(),
+        )
+        return _realesrgan_upsampler
+
+
+def initialize_realesrgan() -> None:
+    """Download the weights and initialize Real-ESRGAN before serving requests."""
+    get_realesrgan_upsampler()
+
+
 def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
     if algorithm == "none":
         return img
@@ -162,6 +226,8 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
         enhanced = cv2.addWeighted(rgb, 1.6, blurred, -0.6, 0)
     elif algorithm == "detail":
         enhanced = cv2.detailEnhance(rgb, sigma_s=10, sigma_r=0.15)
+    elif algorithm == "realesrgan_x4plus":
+        enhanced, _ = get_realesrgan_upsampler().enhance(rgb, outscale=4)
     else:
         return img
 
@@ -270,7 +336,10 @@ def get_original(image_id):
 @app.route("/process/<image_id>", methods=["POST"])
 def process(image_id):
     params = request.get_json(force=True) or {}
-    img = process_image(current_source_path(image_id), params)
+    try:
+        img = process_image(current_source_path(image_id), params)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -286,7 +355,10 @@ def commit(image_id):
     label = params.pop("label", "Edit")
     params.pop("preview", None)  # never bake the preview downscale into a step
 
-    img = process_image(current_source_path(image_id), params)
+    try:
+        img = process_image(current_source_path(image_id), params)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
     entry = add_history_step(image_id, img, label)
     width, height = img.size
 
@@ -354,4 +426,9 @@ def download(filename):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    debug = True
+    # Flask's debug reloader starts a parent watcher and a child server.
+    # Initialize the model only in the process that serves requests.
+    if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        initialize_realesrgan()
+    app.run(debug=debug, port=5000)

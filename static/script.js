@@ -168,8 +168,9 @@ function changeZoom(delta) {
   applyPreviewTransform();
 }
 
-function setStatus(text) {
+function setStatus(text, modal = false) {
   statusEl.textContent = text;
+  statusEl.classList.toggle("processing-modal", modal && Boolean(text));
 }
 
 function fitPreviewToPane() {
@@ -210,16 +211,17 @@ function currentParams() {
   return params;
 }
 
-async function commitStep(params, label) {
+async function commitStep(params, label, showModal = false) {
   if (!state.imageId) return;
-  setStatus("Applying...");
+  setStatus("Applying...", showModal);
   const res = await fetch(`/commit/${state.imageId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...params, label }),
   });
   if (!res.ok) {
-    setStatus("Failed to apply");
+    const data = await res.json().catch(() => ({}));
+    setStatus(data.error || "Failed to apply");
     return;
   }
   const data = await res.json();
@@ -652,7 +654,7 @@ applyCropBtn.addEventListener("click", () => {
   state.aspectRatio = w / h;
   cropBox.hidden = true;
   resetZoomState();
-  commitStep({ crop: { x, y, w, h } }, `Crop ${w}×${h}`);
+  commitStep({ crop: { x, y, w, h } }, `Crop ${w}×${h}`, true);
 });
 
 clearCropBtn.addEventListener("click", () => {
@@ -681,6 +683,6 @@ applyResizeBtn.addEventListener("click", () => {
   const label = algorithm === "none"
     ? `Resize ${w}×${h}`
     : `Resize ${w}×${h} + ${enhancement.options[enhancement.selectedIndex].text}`;
-  commitStep({ resize: { w, h }, enhancement: algorithm }, label);
+  commitStep({ resize: { w, h }, enhancement: algorithm }, label, true);
   enhancement.value = "none";
 });

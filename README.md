@@ -31,7 +31,8 @@ pkill -f 'python.*app.py' || true; pkill -f 'python -c .*import app' || true; pk
    color balance (red/green/blue). Previews update live.
 3. Drag on the image to select a crop region, then click **Apply crop**.
 4. Enter a width/height and click **Apply resize** to resize (aspect ratio
-   locking is optional).
+   locking is optional). Choose **RealESRGAN x4plus** for AI upscaling. Its
+   model weights are downloaded and initialized when the app starts.
 5. Click **Reset** to discard all adjustments and start over from the
    original upload.
 6. Click **Save to project** to write the edited image into `saved/` inside
@@ -42,5 +43,7 @@ pkill -f 'python.*app.py' || true; pkill -f 'python -c .*import app' || true; pk
 - Original uploads are kept in `uploads/`; edits are always recomputed from
   the original, so nothing is destructively overwritten until you save.
 - Saved exports land in `saved/` as PNG files.
+- RealESRGAN weights are cached at `models/RealESRGAN_x4plus.pth`. Set
+   `REALESRGAN_MODEL_PATH` to use a different local weights file.
 - Both `uploads/` and `saved/` are git-ignored (aside from `.gitkeep`) since
   they hold user data, not source.
