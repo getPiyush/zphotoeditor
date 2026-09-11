@@ -15,6 +15,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+# Pillow's decompression-bomb guard (default ~89.5 megapixels) exists to
+# protect public-facing services from malicious uploads; this is a local,
+# single-user editor working on the user's own photos, so a legitimate very
+# large or wide image (a high-res scan, a panorama) shouldn't be rejected.
+Image.MAX_IMAGE_PIXELS = None
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 SAVED_DIR = BASE_DIR / "saved"
@@ -26,7 +32,10 @@ SAVED_DIR.mkdir(exist_ok=True)
 STEPS_DIR.mkdir(exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
+# High-resolution photos (e.g. 8000px+ PNG/TIFF exports) can comfortably exceed
+# tens of MB even before any editing; 25 MB was rejecting real uploads with an
+# opaque failure, so this is sized for that case rather than typical web images.
+app.config["MAX_CONTENT_LENGTH"] = 150 * 1024 * 1024  # 150 MB
 
 # In-memory edit history per image_id: [{"id", "timestamp", "label", "params"}, ...]
 HISTORY: dict[str, list[dict]] = {}
@@ -88,13 +97,20 @@ def current_source_path(image_id: str) -> Path:
 
 def clear_working_images() -> None:
     """Wipe every previously uploaded/edited photo (originals + history steps)
-    so only the newly uploaded one remains. Saved/exported downloads are untouched."""
+    and every previously saved/exported download, so only the newly uploaded
+    photo remains."""
+    # Path.glob("*") matches dotfiles too (unlike a shell glob), so this
+    # excludes them explicitly -- otherwise repeated uploads silently delete
+    # housekeeping files like .gitkeep.
     for f in UPLOAD_DIR.glob("*"):
-        if f.is_file():
+        if f.is_file() and not f.name.startswith("."):
             f.unlink()
     for d in STEPS_DIR.glob("*"):
         if d.is_dir():
             shutil.rmtree(d)
+    for f in SAVED_DIR.glob("*"):
+        if f.is_file() and not f.name.startswith("."):
+            f.unlink()
     HISTORY.clear()
     ACTIVE_HISTORY_COUNT.clear()
     _SOURCE_CACHE.clear()
@@ -526,6 +542,10 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     rotation = int(float(params.get("rotation", 0) or 0)) % 360
     if rotation:
         img = img.rotate(-rotation, expand=True)
+    if params.get("flip_h"):
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+    if params.get("flip_v"):
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
     crop = params.get("crop")
     if crop:
@@ -634,6 +654,15 @@ def current_source_image(image_id: str, steps=None) -> Image.Image:
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.errorhandler(413)
+def handle_file_too_large(_exc):
+    # Without this, an oversized upload gets Werkzeug's default HTML error
+    # page, which the frontend's `res.json()` can't parse -- the user just
+    # sees a generic "Upload failed" with no indication it was a size issue.
+    limit_mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
+    return jsonify(error=f"File is too large (max {limit_mb} MB)"), 413
 
 
 @app.route("/upload", methods=["POST"])
