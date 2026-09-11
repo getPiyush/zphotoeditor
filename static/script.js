@@ -14,6 +14,7 @@ const clearCropBtn = document.getElementById("clearCropBtn");
 const cropDragBtn = document.getElementById("cropDragBtn");
 const cropSelectBtn = document.getElementById("cropSelectBtn");
 const applyResizeBtn = document.getElementById("applyResizeBtn");
+const applyEnhancementBtn = document.getElementById("applyEnhancementBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
 const resetZoomBtn = document.getElementById("resetZoomBtn");
@@ -39,6 +40,14 @@ const historyFileInput = document.getElementById("historyFileInput");
 const historyImportDialog = document.getElementById("historyImportDialog");
 const historyImportMode = document.getElementById("historyImportMode");
 const historyImportFilter = document.getElementById("historyImportFilter");
+const historyImportExcludeRealesrgan = document.getElementById("historyImportExcludeRealesrgan");
+const historyExportDialog = document.getElementById("historyExportDialog");
+const historyExportFileName = document.getElementById("historyExportFileName");
+const historyExportExcludeRealesrgan = document.getElementById("historyExportExcludeRealesrgan");
+const enhanceProgress = document.getElementById("enhanceProgress");
+const enhanceProgressText = document.getElementById("enhanceProgressText");
+const enhanceProgressFill = document.getElementById("enhanceProgressFill");
+const enhanceCancelBtn = document.getElementById("enhanceCancelBtn");
 const initialPreviewSrc = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='420' viewBox='0 0 640 420'%3E%3Crect width='640' height='420' fill='%23000'/%3E%3C/svg%3E";
 
 const SLIDER_LABELS = {
@@ -439,11 +448,16 @@ function closeHistoryImportDialog() {
   historyImportDialog.hidden = true;
 }
 
-async function importHistory(file, mode, filter) {
+function closeHistoryExportDialog() {
+  historyExportDialog.hidden = true;
+}
+
+async function importHistory(file, mode, filter, excludeRealesrgan) {
   const form = new FormData();
   form.append("history", file);
   form.append("mode", mode);
   form.append("filter", filter);
+  form.append("exclude_realesrgan", excludeRealesrgan ? "true" : "false");
   setStatus("Importing history...", true);
   const res = await fetch(`/history/${state.imageId}/import`, { method: "POST", body: form });
   const data = await res.json().catch(() => ({}));
@@ -618,6 +632,7 @@ fileInput.addEventListener("change", async () => {
   applyCropBtn.disabled = false;
   clearCropBtn.disabled = false;
   applyResizeBtn.disabled = false;
+  applyEnhancementBtn.disabled = false;
   downloadBtn.hidden = false;
   setStatus("");
 });
@@ -703,6 +718,7 @@ historyFileInput.addEventListener("change", () => {
   historyImportDialog.hidden = false;
   historyImportMode.value = "replace";
   historyImportFilter.value = "none";
+  historyImportExcludeRealesrgan.checked = true;
   historyImportDialog.dataset.fileName = file.name;
   historyImportDialog._file = file;
 });
@@ -716,16 +732,33 @@ historyImportDialog.addEventListener("click", (event) => {
   if (!mode) return;
   const file = historyImportDialog._file;
   closeHistoryImportDialog();
-  if (mode === "import" && file) importHistory(file, historyImportMode.value, historyImportFilter.value);
+  if (mode === "import" && file) {
+    importHistory(file, historyImportMode.value, historyImportFilter.value, historyImportExcludeRealesrgan.checked);
+  }
 });
 
-exportHistoryBtn.addEventListener("click", async () => {
+exportHistoryBtn.addEventListener("click", () => {
   if (!state.imageId) return;
-  const requestedName = window.prompt("Save settings as:", "zphotoeditor-settings.json");
-  if (!requestedName) return;
+  historyExportFileName.value = "zphotoeditor-settings.json";
+  historyExportExcludeRealesrgan.checked = true;
+  historyExportDialog.hidden = false;
+});
+
+historyExportDialog.addEventListener("click", async (event) => {
+  if (event.target === historyExportDialog) {
+    closeHistoryExportDialog();
+    return;
+  }
+  const mode = event.target.closest("[data-history-mode]")?.dataset.historyMode;
+  if (!mode) return;
+  const requestedName = historyExportFileName.value.trim() || "zphotoeditor-settings.json";
+  const excludeRealesrgan = historyExportExcludeRealesrgan.checked;
+  closeHistoryExportDialog();
+  if (mode !== "export") return;
+
   const filename = requestedName.toLowerCase().endsWith(".json") ? requestedName : `${requestedName}.json`;
   setStatus("Exporting history...");
-  const res = await fetch(`/history/${state.imageId}/export`);
+  const res = await fetch(`/history/${state.imageId}/export?exclude_realesrgan=${excludeRealesrgan}`);
   if (!res.ok) {
     setStatus("History export failed");
     return;
@@ -960,21 +993,129 @@ resizeH.addEventListener("input", () => {
   }
 });
 
+// --- Real-ESRGAN: runs as a polled background job so its progress can be
+// shown and the run can be cancelled, instead of blocking on one long request.
+let activeEnhanceJobId = null;
+
+async function runRealesrganEnhance(w, h, label) {
+  enhanceProgress.hidden = false;
+  enhanceProgressFill.style.width = "0%";
+  enhanceProgressText.textContent = "Starting Real-ESRGAN…";
+
+  const startRes = await fetch(`/enhance/${state.imageId}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resize: { w, h } }),
+  });
+  if (!startRes.ok) {
+    enhanceProgress.hidden = true;
+    setStatus("Failed to start enhancement");
+    return;
+  }
+  const { job_id: jobId } = await startRes.json();
+  activeEnhanceJobId = jobId;
+
+  const poll = async () => {
+    if (activeEnhanceJobId !== jobId) return;
+    const res = await fetch(`/enhance/${state.imageId}/status/${jobId}`);
+    if (!res.ok) {
+      activeEnhanceJobId = null;
+      enhanceProgress.hidden = true;
+      setStatus("Lost track of the enhancement job");
+      return;
+    }
+    const data = await res.json();
+
+    if (data.status === "running") {
+      const pct = data.tiles_total ? Math.round((data.tiles_done / data.tiles_total) * 100) : 0;
+      enhanceProgressFill.style.width = `${pct}%`;
+      enhanceProgressText.textContent = data.tiles_total
+        ? `Running Real-ESRGAN… tile ${data.tiles_done}/${data.tiles_total} (${data.elapsed.toFixed(1)}s)`
+        : `Running Real-ESRGAN… (${data.elapsed.toFixed(1)}s)`;
+      setTimeout(poll, 2000);
+      return;
+    }
+
+    if (data.status === "cancelled") {
+      activeEnhanceJobId = null;
+      enhanceProgress.hidden = true;
+      setStatus("Enhancement cancelled");
+      return;
+    }
+
+    if (data.status === "error") {
+      activeEnhanceJobId = null;
+      enhanceProgress.hidden = true;
+      setStatus(data.error || "Enhancement failed");
+      return;
+    }
+
+    // done: hand the result off to be committed as a history step
+    enhanceProgressFill.style.width = "100%";
+    enhanceProgressText.textContent = "Finishing…";
+    const finishRes = await fetch(`/enhance/${state.imageId}/finish/${jobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    activeEnhanceJobId = null;
+    enhanceProgress.hidden = true;
+    if (!finishRes.ok) {
+      const errData = await finishRes.json().catch(() => ({}));
+      setStatus(errData.error || "Failed to apply enhancement");
+      return;
+    }
+    const finishData = await finishRes.json();
+    state.history = finishData.history;
+    state.currentStepId = finishData.current ? finishData.current.id : null;
+    state.naturalWidth = finishData.width;
+    state.naturalHeight = finishData.height;
+    renderHistory();
+    requestPreview();
+    setStatus("");
+  };
+  poll();
+}
+
+enhanceCancelBtn.addEventListener("click", () => {
+  if (!activeEnhanceJobId || !state.imageId) return;
+  const jobId = activeEnhanceJobId;
+  const imageId = state.imageId;
+  // Close the modal immediately; the job is left to wind down on the server
+  // (it stops between tiles) without the UI waiting on that confirmation.
+  activeEnhanceJobId = null;
+  enhanceProgress.hidden = true;
+  setStatus("Enhancement cancelled");
+  fetch(`/enhance/${imageId}/cancel/${jobId}`, { method: "POST" });
+});
+
 applyResizeBtn.addEventListener("click", () => {
-  if (!state.imageId) return;
+  if (!state.imageId || activeEnhanceJobId) return;
   const w = parseInt(resizeW.value, 10);
   const h = parseInt(resizeH.value, 10);
   if (!w || !h) return;
+  commitStep({ resize: { w, h } }, `Resize ${w}×${h}`, true);
+});
+
+applyEnhancementBtn.addEventListener("click", () => {
+  if (!state.imageId || activeEnhanceJobId) return;
   const algorithm = enhancement.value;
+  if (algorithm === "none") return;
   const strength = parseInt(enhancementStrength.value, 10);
-  const label = algorithm === "none"
-    ? `Resize ${w}×${h}`
-    : `Resize ${w}×${h} + ${enhancement.options[enhancement.selectedIndex].text} ${strength}%`;
-  commitStep({ resize: { w, h }, enhancement: algorithm, enhancement_strength: strength }, label, true);
+  const label = enhancement.options[enhancement.selectedIndex].text;
+
+  if (algorithm === "realesrgan_x4plus") {
+    // No explicit resize target here (that's the Resize section's job) -- keep
+    // the current dimensions, so this acts as a detail-recovering sharpen
+    // rather than also upscaling the output.
+    runRealesrganEnhance(state.naturalWidth, state.naturalHeight, label);
+  } else {
+    commitStep({ enhancement: algorithm, enhancement_strength: strength }, `${label} ${strength}%`, true);
+  }
   enhancement.value = "none";
   enhancementStrength.value = "100";
   enhancementStrengthOutput.textContent = "100%";
-  enhancementStrengthField.hidden = false;
+  updateEnhancementStrengthVisibility();
 });
 
 function updateEnhancementStrengthVisibility() {

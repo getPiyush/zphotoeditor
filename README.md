@@ -21,7 +21,7 @@ Then open http://127.0.0.1:5000 in a browser.
 If a previous Flask server is still running and port 5000 is busy, stop all Python/Flask processes with:
 
 ```bash
-pkill -f 'python.*app.py' || true; pkill -f 'python -c .*import app' || true; pkill -f 'flask run' || true; pkill -f 'python.*flask' || true
+pkill -if 'python.*app.py' || true; pkill -if 'python -c .*import app' || true; pkill -if 'flask run' || true; pkill -if 'python.*flask' || true
 ```
 
 ## Usage

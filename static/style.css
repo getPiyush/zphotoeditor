@@ -246,6 +246,53 @@ body {
   to { transform: rotate(360deg); }
 }
 
+.enhance-progress-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 12, 18, 0.58);
+}
+
+.enhance-progress-modal[hidden] {
+  display: none;
+}
+
+.enhance-progress-box {
+  width: min(320px, calc(100vw - 48px));
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+  text-align: center;
+}
+
+.enhance-progress-box p {
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.enhance-progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.enhance-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

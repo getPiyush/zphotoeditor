@@ -47,6 +47,13 @@
       </div>
     </div>
     <p id="status" class="status" role="status" aria-live="polite"></p>
+    <div id="enhanceProgress" class="enhance-progress-modal" hidden>
+      <div class="enhance-progress-box">
+        <p id="enhanceProgressText">Running Real-ESRGAN…</p>
+        <div class="enhance-progress-bar"><div id="enhanceProgressFill" class="enhance-progress-fill"></div></div>
+        <button id="enhanceCancelBtn" type="button" class="btn secondary">Cancel</button>
+      </div>
+    </div>
   </section>
 
   <aside class="panel">
@@ -167,13 +174,25 @@
 
       <div class="accordion-item open">
         <button class="accordion-header" type="button" aria-expanded="true">
-          <span>Resize &amp; Enhance</span>
+          <span>Resize</span>
           <span class="chevron">▾</span>
         </button>
         <div class="accordion-body">
           <label class="inline">W <input type="number" id="resizeW" min="1"></label>
           <label class="inline">H <input type="number" id="resizeH" min="1"></label>
           <label class="checkbox"><input type="checkbox" id="lockAspect" checked> Lock aspect ratio</label>
+          <button id="applyResizeBtn" class="btn icon-btn secondary" title="Apply resize" aria-label="Apply resize" disabled>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="accordion-item open">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span>Enhancements</span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
           <label>Enhancement
             <select id="enhancement">
               <option value="none">None</option>
@@ -190,7 +209,7 @@
           <label id="enhancementStrengthField">Enhancement strength <span id="enhancementStrengthOutput">100%</span>
             <input type="range" id="enhancementStrength" min="0" max="100" step="1" value="100">
           </label>
-          <button id="applyResizeBtn" class="btn icon-btn secondary" title="Apply resize" aria-label="Apply resize" disabled>
+          <button id="applyEnhancementBtn" class="btn icon-btn secondary" title="Apply enhancement" aria-label="Apply enhancement" disabled>
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
         </div>
@@ -198,7 +217,7 @@
 
       <div class="accordion-item">
         <button class="accordion-header" type="button" aria-expanded="true">
-          <span>History Manager</span>
+          <span>History</span>
           <span class="chevron">▾</span>
         </button>
         <div class="accordion-body">
@@ -244,8 +263,25 @@
         <option value="crop-resize">Exclude crop and resize settings</option>
       </select>
     </label>
+    <label class="checkbox"><input type="checkbox" id="historyImportExcludeRealesrgan" checked> Exclude Real-ESRGAN</label>
+    <p class="hint">Importing Real-ESRGAN steps is slow -- each one re-runs the enhancement (seconds to minutes) to rebuild the image.</p>
     <div class="history-dialog-actions">
       <button type="button" data-history-mode="import" class="btn primary">Import settings</button>
+      <button type="button" data-history-mode="cancel" class="btn secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="historyExportDialog" class="history-dialog" hidden>
+  <div class="history-dialog-card" role="dialog" aria-modal="true" aria-labelledby="historyExportDialogTitle">
+    <h2 id="historyExportDialogTitle">Export history</h2>
+    <label class="history-import-field">File name
+      <input type="text" id="historyExportFileName" value="zphotoeditor-settings.json">
+    </label>
+    <label class="checkbox"><input type="checkbox" id="historyExportExcludeRealesrgan" checked> Exclude Real-ESRGAN</label>
+    <p class="hint">Importing Real-ESRGAN steps is slow -- each one re-runs the enhancement (seconds to minutes) to rebuild the image.</p>
+    <div class="history-dialog-actions">
+      <button type="button" data-history-mode="export" class="btn primary">Export settings</button>
       <button type="button" data-history-mode="cancel" class="btn secondary">Cancel</button>
     </div>
   </div>
