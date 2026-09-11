@@ -64,6 +64,12 @@ body {
   flex-shrink: 0;
 }
 
+#actualSizeBtn {
+  min-width: 34px;
+  font-size: 11px;
+  line-height: 1;
+}
+
 .layout {
   display: grid;
   grid-template-columns: 1fr 300px;
@@ -71,6 +77,19 @@ body {
   padding: 16px 20px;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.layout.panel-collapsed {
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+
+.layout.panel-collapsed .panel {
+  min-width: 0;
+  padding: 0;
+  border-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .canvas-area {
@@ -82,6 +101,7 @@ body {
   justify-content: flex-start;
   position: relative;
   min-height: 0;
+  min-width: 0;
   flex-direction: column;
   width: 100%;
   height: 100%;
@@ -95,6 +115,7 @@ body {
   width: 100%;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
@@ -231,6 +252,8 @@ body {
   border-radius: 10px;
   padding: 16px;
   overflow-y: auto;
+  min-width: 0;
+  transition: opacity 0.18s ease, padding 0.18s ease, border-width 0.18s ease;
 }
 
 .accordion {
@@ -338,13 +361,130 @@ fieldset .btn { width: 100%; margin-top: 6px; }
   overflow-y: auto;
 }
 
+.history-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.history-actions .btn {
+  flex: 1;
+  padding: 7px 10px;
+}
+
+.history-track-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.history-track-actions .icon-btn {
+  padding: 7px;
+}
+
+.history-track-actions .btn:last-child {
+  margin-left: auto;
+  padding: 7px 10px;
+}
+
+.history-dialog[hidden] {
+  display: none;
+}
+
+.history-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 12, 18, 0.68);
+}
+
+.history-dialog-card {
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+}
+
+.history-dialog-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.history-dialog-card p {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.history-import-field {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.history-import-field select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #333644;
+  color: var(--text);
+}
+
+.history-dialog-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.history-dialog-actions .btn {
+  width: 100%;
+}
+
 .history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid transparent;
   font-size: 13px;
   cursor: pointer;
   background: rgba(255, 255, 255, 0.02);
+}
+
+.history-item.dragging {
+  opacity: 0.45;
+}
+
+.history-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-delete {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 0 0 8px;
+}
+
+.history-delete:hover {
+  color: var(--text);
 }
 
 .history-item:hover {

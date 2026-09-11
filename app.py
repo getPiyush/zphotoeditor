@@ -1,4 +1,5 @@
 import io
+import json
 import math
 import os
 import shutil
@@ -26,9 +27,9 @@ STEPS_DIR.mkdir(exist_ok=True)
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
 
-# In-memory edit history per image_id: [{"id", "timestamp", "filename", "label"}, ...]
-# The last entry (if any) is always the current source image for further edits.
+# In-memory edit history per image_id: [{"id", "timestamp", "label", "params"}, ...]
 HISTORY: dict[str, list[dict]] = {}
+ACTIVE_HISTORY_COUNT: dict[str, int] = {}
 REALESRGAN_MODEL_URL = (
     "https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth"
 )
@@ -52,9 +53,6 @@ def step_dir_path(image_id: str) -> Path:
 
 
 def current_source_path(image_id: str) -> Path:
-    steps = HISTORY.get(image_id) or []
-    if steps:
-        return step_dir_path(image_id) / steps[-1]["filename"]
     return original_path(image_id)
 
 
@@ -68,18 +66,34 @@ def clear_working_images() -> None:
         if d.is_dir():
             shutil.rmtree(d)
     HISTORY.clear()
+    ACTIVE_HISTORY_COUNT.clear()
 
 
-def add_history_step(image_id: str, img: Image.Image, label: str) -> dict:
-    d = step_dir_path(image_id)
-    d.mkdir(parents=True, exist_ok=True)
+def add_history_step(image_id: str, params: dict, label: str) -> dict:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     step_id = uuid.uuid4().hex[:8]
-    filename = f"{timestamp}_{step_id}.png"
-    img.save(d / filename, format="PNG")
-    entry = {"id": step_id, "timestamp": timestamp, "filename": filename, "label": label}
+    entry = {"id": step_id, "timestamp": timestamp, "label": label, "params": params}
     HISTORY.setdefault(image_id, []).append(entry)
     return entry
+
+
+def remove_history_steps(image_id: str) -> None:
+    HISTORY[image_id] = []
+    ACTIVE_HISTORY_COUNT[image_id] = 0
+    ACTIVE_HISTORY_COUNT[image_id] = 0
+
+
+def history_settings(image_id: str) -> dict:
+    return {
+        "format": "zphotoeditor-settings",
+        "version": 1,
+        "source_image_id": image_id,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "steps": [
+            {"label": step.get("label", "Edit"), "timestamp": step.get("timestamp", ""), "params": step.get("params", {})}
+            for step in HISTORY.get(image_id, [])
+        ],
+    }
 
 
 def apply_channel_balance(img: Image.Image, r: float, g: float, b: float) -> Image.Image:
@@ -93,6 +107,47 @@ def apply_channel_balance(img: Image.Image, r: float, g: float, b: float) -> Ima
     ]
     new_bands.extend(bands[len(new_bands):])
     return Image.merge(img.mode, new_bands)
+
+
+def resize_image(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    target_width, target_height = size
+    if target_width >= img.width and target_height >= img.height:
+        return img.resize(size, Image.Resampling.LANCZOS)
+
+    channels = np.array(img)
+    resized = cv2.resize(channels, size, interpolation=cv2.INTER_AREA)
+    return Image.fromarray(resized, mode=img.mode)
+
+
+def apply_warmth(img: Image.Image, warmth: float) -> Image.Image:
+    if warmth == 0:
+        return img
+    base = img.convert("RGBA") if img.mode == "RGBA" else img.convert("RGB")
+    red, green, blue = base.split()[:3]
+    red_factor = 1 + warmth * 0.35
+    blue_factor = 1 - warmth * 0.35
+    red = red.point(lambda p: max(0, min(255, int(p * red_factor))))
+    blue = blue.point(lambda p: max(0, min(255, int(p * blue_factor))))
+    channels = (red, green, blue)
+    if base.mode == "RGBA":
+        channels += (base.getchannel("A"),)
+    return Image.merge(base.mode, channels)
+
+
+def apply_vignette(img: Image.Image, amount: float) -> Image.Image:
+    if amount <= 0:
+        return img
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = np.array(img.convert("RGB"), dtype=np.float32)
+    height, width = base.shape[:2]
+    y, x = np.ogrid[:height, :width]
+    distance = np.sqrt(((x - (width - 1) / 2) / max(width / 2, 1)) ** 2 + ((y - (height - 1) / 2) / max(height / 2, 1)) ** 2)
+    mask = np.clip((distance - 0.35) / 0.65, 0, 1)
+    base *= 1 - (mask[..., None] * min(amount, 1) * 0.75)
+    result = Image.fromarray(np.uint8(np.clip(base, 0, 255)))
+    if alpha is not None:
+        result.putalpha(alpha)
+    return result
 
 
 def apply_exposure(img: Image.Image, exposure: float) -> Image.Image:
@@ -204,7 +259,7 @@ def initialize_realesrgan() -> None:
     get_realesrgan_upsampler()
 
 
-def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
+def apply_enhancement(img: Image.Image, algorithm: str, strength: float = 100) -> Image.Image:
     if algorithm == "none":
         return img
 
@@ -216,6 +271,11 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
         lightness, a_channel, b_channel = cv2.split(lab)
         lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(lightness)
         enhanced = cv2.cvtColor(cv2.merge((lightness, a_channel, b_channel)), cv2.COLOR_LAB2RGB)
+    elif algorithm == "blur":
+        enhanced = cv2.GaussianBlur(rgb, (0, 0), 1.5)
+    elif algorithm == "edge":
+        laplacian = cv2.Laplacian(rgb, cv2.CV_32F, ksize=3)
+        enhanced = np.clip(rgb.astype(np.float32) - 0.7 * laplacian, 0, 255).astype(np.uint8)
     elif algorithm == "filter2d":
         kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
         enhanced = cv2.filter2D(rgb, -1, kernel)
@@ -231,6 +291,10 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
     else:
         return img
 
+    if algorithm != "realesrgan_x4plus":
+        strength = max(0, min(100, float(strength))) / 100
+        enhanced = cv2.addWeighted(rgb, 1 - strength, enhanced, strength, 0)
+
     result = Image.fromarray(enhanced)
     if alpha is not None:
         result.putalpha(alpha)
@@ -238,7 +302,11 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
 
 
 def process_image(source: Path, params: dict) -> Image.Image:
-    img = Image.open(source)
+    with Image.open(source) as source_image:
+        return process_image_object(source_image.copy(), params)
+
+
+def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     img = normalize_orientation(img)
     img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
 
@@ -253,9 +321,13 @@ def process_image(source: Path, params: dict) -> Image.Image:
 
     resize = params.get("resize")
     if resize and resize.get("w") and resize.get("h"):
-        img = img.resize((int(resize["w"]), int(resize["h"])), Image.LANCZOS)
+        img = resize_image(img, (int(resize["w"]), int(resize["h"])))
 
-    img = apply_enhancement(img, params.get("enhancement", "none"))
+    img = apply_enhancement(
+        img,
+        params.get("enhancement", "none"),
+        params.get("enhancement_strength", 100),
+    )
 
     brightness = float(params.get("brightness", 1.0))
     contrast = float(params.get("contrast", 1.0))
@@ -265,6 +337,9 @@ def process_image(source: Path, params: dict) -> Image.Image:
     shadows = float(params.get("shadows", 1.0))
     saturation = float(params.get("saturation", 1.0))
     vibrance = float(params.get("vibrance", 1.0))
+    warmth = float(params.get("warmth", 0.0))
+    pop = float(params.get("pop", 1.0))
+    vignette = float(params.get("vignette", 0.0))
     r = float(params.get("r", 1.0))
     g = float(params.get("g", 1.0))
     b = float(params.get("b", 1.0))
@@ -281,16 +356,32 @@ def process_image(source: Path, params: dict) -> Image.Image:
     if saturation != 1.0:
         img = ImageEnhance.Color(img).enhance(saturation)
     img = apply_vibrance(img, vibrance - 1.0)
+    img = apply_warmth(img, warmth)
+    if pop != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(pop)
+        img = ImageEnhance.Color(img).enhance(1 + (pop - 1) * 0.35)
     img = apply_channel_balance(img, r, g, b)
+    img = apply_vignette(img, vignette)
 
     preview = params.get("preview")
     if preview and preview.get("w") and preview.get("h"):
         max_w = int(preview["w"])
         max_h = int(preview["h"])
         if max_w > 0 and max_h > 0:
-            img.thumbnail((max_w, max_h), Image.LANCZOS)
+            scale = min(max_w / img.width, max_h / img.height, 1)
+            if scale < 1:
+                img = resize_image(img, (max(1, round(img.width * scale)), max(1, round(img.height * scale))))
 
     return img
+
+
+def current_source_image(image_id: str, steps=None) -> Image.Image:
+    with Image.open(original_path(image_id)) as source:
+        image = source.copy()
+    replay_steps = steps if steps is not None else HISTORY.get(image_id, [])[:ACTIVE_HISTORY_COUNT.get(image_id, len(HISTORY.get(image_id, [])))]
+    for step in replay_steps:
+        image = process_image_object(image, step.get("params", {}))
+    return image
 
 
 @app.route("/")
@@ -337,7 +428,7 @@ def get_original(image_id):
 def process(image_id):
     params = request.get_json(force=True) or {}
     try:
-        img = process_image(current_source_path(image_id), params)
+        img = process_image_object(current_source_image(image_id), params)
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
 
@@ -349,17 +440,17 @@ def process(image_id):
 
 @app.route("/commit/<image_id>", methods=["POST"])
 def commit(image_id):
-    """Apply the given (incremental) edit to the current source image and
-    persist the result as a new history step, which becomes the new source."""
+    """Store settings for an edit; the source is replayed from the original."""
     params = request.get_json(force=True) or {}
     label = params.pop("label", "Edit")
     params.pop("preview", None)  # never bake the preview downscale into a step
 
     try:
-        img = process_image(current_source_path(image_id), params)
+        img = process_image_object(current_source_image(image_id), params)
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
-    entry = add_history_step(image_id, img, label)
+    entry = add_history_step(image_id, params, label)
+    ACTIVE_HISTORY_COUNT[image_id] = len(HISTORY[image_id])
     width, height = img.size
 
     return jsonify(history=HISTORY[image_id], current=entry, width=width, height=height)
@@ -367,41 +458,170 @@ def commit(image_id):
 
 @app.route("/revert/<image_id>", methods=["POST"])
 def revert(image_id):
-    """Make an earlier step (or the original) the current source again,
-    discarding the steps that came after it."""
+    """View an earlier step without discarding later settings."""
     data = request.get_json(force=True) or {}
     step_id = data.get("step_id") or "original"
     steps = HISTORY.get(image_id, [])
-    d = step_dir_path(image_id)
 
     if step_id == "original":
-        for step in steps:
-            (d / step["filename"]).unlink(missing_ok=True)
-        HISTORY[image_id] = []
-        with Image.open(original_path(image_id)) as img:
-            width, height = img.size
-        return jsonify(history=[], current=None, width=width, height=height)
+        ACTIVE_HISTORY_COUNT[image_id] = 0
+        with Image.open(original_path(image_id)) as image:
+            width, height = image.size
+        return jsonify(history=HISTORY.get(image_id, []), current=None, width=width, height=height)
 
     idx = next((i for i, s in enumerate(steps) if s["id"] == step_id), None)
     if idx is None:
         abort(404, description="Step not found")
 
-    for step in steps[idx + 1 :]:
-        (d / step["filename"]).unlink(missing_ok=True)
-    HISTORY[image_id] = steps[: idx + 1]
+    ACTIVE_HISTORY_COUNT[image_id] = idx + 1
 
-    with Image.open(d / steps[idx]["filename"]) as img:
-        width, height = img.size
+    with current_source_image(image_id) as image:
+        width, height = image.size
     return jsonify(history=HISTORY[image_id], current=HISTORY[image_id][idx], width=width, height=height)
+
+
+def history_state_response(image_id: str):
+    steps = HISTORY.get(image_id, [])
+    active_count = ACTIVE_HISTORY_COUNT.get(image_id, len(steps))
+    current = steps[active_count - 1] if active_count else None
+    with current_source_image(image_id) as image:
+        width, height = image.size
+    return jsonify(history=steps, current=current, width=width, height=height)
+
+
+@app.route("/history/<image_id>/reorder", methods=["POST"])
+def reorder_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    ids = (request.get_json(force=True) or {}).get("ids", [])
+    by_id = {step["id"]: step for step in HISTORY[image_id]}
+    if len(ids) != len(by_id) or set(ids) != set(by_id):
+        return jsonify(error="History order is invalid"), 400
+    HISTORY[image_id] = [by_id[step_id] for step_id in ids]
+    ACTIVE_HISTORY_COUNT[image_id] = len(HISTORY[image_id])
+    return history_state_response(image_id)
+
+
+@app.route("/history/<image_id>/delete/<step_id>", methods=["POST"])
+def delete_history_step(image_id, step_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    steps = HISTORY[image_id]
+    if not any(step["id"] == step_id for step in steps):
+        abort(404, description="Step not found")
+    HISTORY[image_id] = [step for step in steps if step["id"] != step_id]
+    ACTIVE_HISTORY_COUNT[image_id] = len(HISTORY[image_id])
+    return history_state_response(image_id)
+
+
+@app.route("/history/<image_id>/restore", methods=["POST"])
+def restore_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    data = request.get_json(force=True) or {}
+    steps = data.get("steps")
+    if not isinstance(steps, list) or any(
+        not isinstance(step, dict) or not isinstance(step.get("params"), dict) or not step.get("id")
+        for step in steps
+    ):
+        return jsonify(error="Invalid history state"), 400
+    HISTORY[image_id] = steps
+    active_id = data.get("active_step_id")
+    ACTIVE_HISTORY_COUNT[image_id] = next(
+        (index + 1 for index, step in enumerate(steps) if step["id"] == active_id),
+        len(steps),
+    ) if active_id else len(steps)
+    return history_state_response(image_id)
+
+
+@app.route("/history/<image_id>/export")
+def export_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    exported_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    payload = json.dumps(history_settings(image_id), indent=2).encode("utf-8")
+    return send_file(
+        io.BytesIO(payload),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=f"zphotoeditor-settings-{exported_at}.json",
+    )
+
+
+@app.route("/history/<image_id>/import", methods=["POST"])
+def import_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    uploaded = request.files.get("history")
+    mode = request.form.get("mode", "replace")
+    settings_filter = request.form.get("filter", "none")
+    if not uploaded or not uploaded.filename:
+        return jsonify(error="No history file provided"), 400
+    if mode not in {"before", "after", "replace", "save-replace"}:
+        return jsonify(error="Invalid history import mode"), 400
+    if settings_filter not in {"none", "crop", "resize", "crop-resize"}:
+        return jsonify(error="Invalid history settings filter"), 400
+
+    try:
+        manifest = json.loads(uploaded.read().decode("utf-8"))
+        if manifest.get("format") != "zphotoeditor-settings" or manifest.get("version") != 1:
+            raise ValueError("Unsupported settings file")
+        manifest_steps = manifest.get("steps", [])
+        imported_steps = []
+        for step in manifest_steps:
+            if not isinstance(step.get("params"), dict):
+                raise ValueError("Each history step must contain settings")
+            params = dict(step["params"])
+            if settings_filter in {"crop", "crop-resize"}:
+                params.pop("crop", None)
+            if settings_filter in {"resize", "crop-resize"}:
+                params.pop("resize", None)
+            imported_steps.append({
+                "id": uuid.uuid4().hex[:8],
+                "timestamp": step.get("timestamp") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"),
+                "label": step.get("label", "Imported edit"),
+                "params": params,
+            })
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, OSError) as exc:
+        return jsonify(error=f"Invalid history file: {exc}"), 400
+
+    saved_filename = None
+    if mode == "save-replace":
+        saved_filename = f"zphotoeditor-settings-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.json"
+        (SAVED_DIR / saved_filename).write_text(json.dumps(history_settings(image_id), indent=2), encoding="utf-8")
+
+    existing_steps = list(HISTORY.get(image_id, []))
+    if mode in {"replace", "save-replace"}:
+        remove_history_steps(image_id)
+        existing_steps = []
+
+    if mode == "before":
+        ordered = imported_steps + existing_steps
+    elif mode == "after":
+        ordered = existing_steps + imported_steps
+    else:
+        ordered = imported_steps
+    HISTORY[image_id] = ordered
+    ACTIVE_HISTORY_COUNT[image_id] = len(ordered)
+
+    current = ordered[-1] if ordered else None
+    with current_source_image(image_id) as image:
+        width, height = image.size
+    return jsonify(
+        history=ordered,
+        current=current,
+        width=width,
+        height=height,
+        saved_download_url=f"/download/{saved_filename}" if saved_filename else None,
+    )
 
 
 @app.route("/save/<image_id>", methods=["POST"])
 def save(image_id):
-    source = current_source_path(image_id)
     old_original = original_path(image_id)
     new_original = UPLOAD_DIR / f"{image_id}_original.png"
 
-    with Image.open(source) as img:
+    with current_source_image(image_id) as img:
         img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
         saved_name = f"{image_id}.png"
         img.save(SAVED_DIR / saved_name, format="PNG")
@@ -410,9 +630,8 @@ def save(image_id):
     if old_original != new_original:
         old_original.unlink(missing_ok=True)
 
-    for step in HISTORY.get(image_id, []):
-        (step_dir_path(image_id) / step["filename"]).unlink(missing_ok=True)
     HISTORY[image_id] = []
+    ACTIVE_HISTORY_COUNT[image_id] = 0
 
     return jsonify(saved=True, filename=saved_name, download_url=f"/download/{saved_name}")
 

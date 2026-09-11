@@ -23,6 +23,9 @@
     <a id="downloadBtn" class="btn icon-btn" href="#" hidden title="Download" aria-label="Download">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
     </a>
+    <button id="togglePanelBtn" class="btn icon-btn secondary" type="button" title="Hide adjustments panel" aria-label="Hide adjustments panel" aria-pressed="false">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="m11 9-3 3 3 3"/></svg>
+    </button>
   </div>
 </header>
 
@@ -77,7 +80,7 @@
 
       <div class="accordion-item">
         <button class="accordion-header" type="button" aria-expanded="true">
-          <span>Color balance</span>
+          <span>Color</span>
           <span class="chevron">▾</span>
         </button>
         <div class="accordion-body">
@@ -87,13 +90,22 @@
           <label>Vibrance <span data-out="vibrance">1.00</span>
             <input type="range" id="vibrance" min="0" max="2" step="0.01" value="1">
           </label>
+          <label>Warmth <span data-out="warmth">0.00</span>
+            <input type="range" id="warmth" min="-1" max="1" step="0.01" value="0">
+          </label>
+          <label>Pop <span data-out="pop">1.00</span>
+            <input type="range" id="pop" min="0" max="2" step="0.01" value="1">
+          </label>
+          <label>Vignette <span data-out="vignette">0.00</span>
+            <input type="range" id="vignette" min="0" max="1" step="0.01" value="0">
+          </label>
           <label>Red <span data-out="r">1.00</span>
             <input type="range" id="r" min="0" max="2" step="0.01" value="1">
           </label>
           <label>Green <span data-out="g">1.00</span>
             <input type="range" id="g" min="0" max="2" step="0.01" value="1">
           </label>
-          <label>Blue <span data-out="b">1.00</span>
+          <label>Blue channel <span data-out="b">1.00</span>
             <input type="range" id="b" min="0" max="2" step="0.01" value="1">
           </label>
         </div>
@@ -115,6 +127,7 @@
             <button id="resetZoomBtn" class="btn icon-btn secondary" type="button" title="Reset zoom" aria-label="Reset zoom">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
             </button>
+            <button id="actualSizeBtn" class="btn icon-btn secondary" type="button" title="Actual size (100%)" aria-label="Actual size (100%)">1:1</button>
           </div>
           <div class="rotate-controls">
             <button id="rotateLeftBtn" class="btn icon-btn secondary" type="button" title="Rotate left" aria-label="Rotate left">
@@ -152,9 +165,9 @@
         </div>
       </div>
 
-      <div class="accordion-item">
+      <div class="accordion-item open">
         <button class="accordion-header" type="button" aria-expanded="true">
-          <span>Resize</span>
+          <span>Resize &amp; Enhance</span>
           <span class="chevron">▾</span>
         </button>
         <div class="accordion-body">
@@ -164,6 +177,8 @@
           <label>Enhancement
             <select id="enhancement">
               <option value="none">None</option>
+              <option value="blur">Blur</option>
+              <option value="edge">Edge Sharpen</option>
               <option value="clahe">CLAHE</option>
               <option value="filter2d">Filter2D</option>
               <option value="bilateral">Bilateral Filter</option>
@@ -171,6 +186,9 @@
               <option value="detail">Detail Enhance</option>
               <option value="realesrgan_x4plus">RealESRGAN x4plus (slow)</option>
             </select>
+          </label>
+          <label id="enhancementStrengthField">Enhancement strength <span id="enhancementStrengthOutput">100%</span>
+            <input type="range" id="enhancementStrength" min="0" max="100" step="1" value="100">
           </label>
           <button id="applyResizeBtn" class="btn icon-btn secondary" title="Apply resize" aria-label="Apply resize" disabled>
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -180,17 +198,58 @@
 
       <div class="accordion-item">
         <button class="accordion-header" type="button" aria-expanded="true">
-          <span>History</span>
+          <span>History Manager</span>
           <span class="chevron">▾</span>
         </button>
         <div class="accordion-body">
-          <p class="hint">Click a step to revert to it.</p>
+          <p class="hint">Click a step to view it. Drag steps to reorder them.</p>
           <ul id="historyList" class="history-list"></ul>
+          <div class="history-track-actions">
+            <button id="historyBackBtn" class="btn icon-btn secondary" type="button" title="Step back" aria-label="Step back" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <button id="historyForwardBtn" class="btn icon-btn secondary" type="button" title="Step forward" aria-label="Step forward" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button id="historyResetBtn" class="btn secondary" type="button" title="Reset history change tracking">Reset tracking</button>
+          </div>
+          <div class="history-actions">
+            <button id="importHistoryBtn" class="btn secondary" type="button">Import</button>
+            <button id="exportHistoryBtn" class="btn secondary" type="button">Export</button>
+          </div>
+          <input id="historyFileInput" type="file" accept=".json,application/json" hidden>
         </div>
       </div>
     </div>
   </aside>
 </main>
+
+<div id="historyImportDialog" class="history-dialog" hidden>
+  <div class="history-dialog-card" role="dialog" aria-modal="true" aria-labelledby="historyDialogTitle">
+    <h2 id="historyDialogTitle">Import history</h2>
+    <p>Choose how to combine the imported settings with the current history.</p>
+    <label class="history-import-field">Import mode
+      <select id="historyImportMode">
+        <option value="replace" selected>Replace existing</option>
+        <option value="before">Merge before existing</option>
+        <option value="after">Merge after existing</option>
+        <option value="save-replace">Save existing, then replace</option>
+      </select>
+    </label>
+    <label class="history-import-field">Settings to exclude
+      <select id="historyImportFilter">
+        <option value="none" selected>Include all settings</option>
+        <option value="crop">Exclude crop settings</option>
+        <option value="resize">Exclude resize settings</option>
+        <option value="crop-resize">Exclude crop and resize settings</option>
+      </select>
+    </label>
+    <div class="history-dialog-actions">
+      <button type="button" data-history-mode="import" class="btn primary">Import settings</button>
+      <button type="button" data-history-mode="cancel" class="btn secondary">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
