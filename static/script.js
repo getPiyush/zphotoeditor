@@ -3,6 +3,7 @@ const resetBtn = document.getElementById("resetBtn");
 const saveBtn = document.getElementById("saveBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const togglePanelBtn = document.getElementById("togglePanelBtn");
+const togglePanelLabel = document.getElementById("togglePanelLabel");
 const layout = document.querySelector(".layout");
 const dropHint = document.getElementById("dropHint");
 const imageWrap = document.getElementById("imageWrap");
@@ -21,6 +22,8 @@ const resetZoomBtn = document.getElementById("resetZoomBtn");
 const actualSizeBtn = document.getElementById("actualSizeBtn");
 const rotateLeftBtn = document.getElementById("rotateLeftBtn");
 const rotateRightBtn = document.getElementById("rotateRightBtn");
+const flipHorizontalBtn = document.getElementById("flipHorizontalBtn");
+const flipVerticalBtn = document.getElementById("flipVerticalBtn");
 const zoomLevelEl = document.getElementById("zoomLevel");
 const resizeW = document.getElementById("resizeW");
 const resizeH = document.getElementById("resizeH");
@@ -48,7 +51,6 @@ const enhanceProgress = document.getElementById("enhanceProgress");
 const enhanceProgressText = document.getElementById("enhanceProgressText");
 const enhanceProgressFill = document.getElementById("enhanceProgressFill");
 const enhanceCancelBtn = document.getElementById("enhanceCancelBtn");
-const initialPreviewSrc = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='420' viewBox='0 0 640 420'%3E%3Crect width='640' height='420' fill='%23000'/%3E%3C/svg%3E";
 
 const SLIDER_LABELS = {
   brightness: "Brightness",
@@ -113,8 +115,6 @@ let state = {
   historyRedo: [],
 };
 
-preview.src = initialPreviewSrc;
-preview.classList.add("empty-preview");
 initialPreviewText.hidden = false;
 imageWrap.hidden = false;
 dropHint.hidden = true;
@@ -347,6 +347,7 @@ function recordHistoryStructureChange() {
 }
 
 function renderHistory() {
+  downloadBtn.hidden = state.history.length === 0;
   historyList.innerHTML = "";
   const activeId = state.currentStepId || "original";
 
@@ -614,8 +615,8 @@ fileInput.addEventListener("change", async () => {
   };
 
   applySliderValues(neutralSliderValues());
-  preview.classList.remove("empty-preview");
   initialPreviewText.hidden = true;
+  preview.hidden = false;
   resizeW.value = data.width;
   resizeH.value = data.height;
   cropBox.hidden = true;
@@ -633,13 +634,51 @@ fileInput.addEventListener("change", async () => {
   clearCropBtn.disabled = false;
   applyResizeBtn.disabled = false;
   applyEnhancementBtn.disabled = false;
-  downloadBtn.hidden = false;
+  sliders.forEach((slider) => { slider.disabled = false; });
+  zoomInBtn.disabled = false;
+  zoomOutBtn.disabled = false;
+  resetZoomBtn.disabled = false;
+  actualSizeBtn.disabled = false;
+  rotateLeftBtn.disabled = false;
+  rotateRightBtn.disabled = false;
+  flipHorizontalBtn.disabled = false;
+  flipVerticalBtn.disabled = false;
+  cropDragBtn.disabled = false;
+  cropSelectBtn.disabled = false;
+  resizeW.disabled = false;
+  resizeH.disabled = false;
+  lockAspect.disabled = false;
+  enhancement.disabled = false;
+  enhancementStrength.disabled = false;
+  historyResetBtn.disabled = false;
+  importHistoryBtn.disabled = false;
+  exportHistoryBtn.disabled = false;
   setStatus("");
 });
 
-resetBtn.addEventListener("click", () => {
+resetBtn.addEventListener("click", async () => {
   if (!state.imageId) return;
-  revertTo("original");
+  const confirmed = window.confirm(
+    "Revert to original? This clears all edit history and cannot be undone."
+  );
+  if (!confirmed) return;
+
+  setStatus("Reverting...");
+  const res = await fetch(`/history/${state.imageId}/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ steps: [] }),
+  });
+  if (!res.ok) {
+    setStatus("Revert failed");
+    return;
+  }
+  applyHistoryResponse(await res.json());
+  state.historyUndo = [];
+  state.historyRedo = [];
+  updateHistoryTrackButtons();
+  cropBox.hidden = true;
+  setStatus("");
 });
 
 zoomInBtn.addEventListener("click", () => changeZoom(1.2));
@@ -653,6 +692,14 @@ rotateLeftBtn.addEventListener("click", () => {
 rotateRightBtn.addEventListener("click", () => {
   if (!state.imageId) return;
   commitStep({ rotation: 90 }, "Rotate right");
+});
+flipHorizontalBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  commitStep({ flip_h: true }, "Flip horizontal");
+});
+flipVerticalBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  commitStep({ flip_v: true }, "Flip vertical");
 });
 cropDragBtn.addEventListener("click", () => setCropMode("drag"));
 cropSelectBtn.addEventListener("click", () => setCropMode("select"));
@@ -694,7 +741,6 @@ saveBtn.addEventListener("click", async () => {
   }
   const data = await res.json();
   downloadBtn.href = data.download_url;
-  downloadBtn.hidden = false;
   state.history = [];
   state.currentStepId = null;
   renderHistory();
@@ -802,6 +848,7 @@ togglePanelBtn.addEventListener("click", () => {
   togglePanelBtn.setAttribute("aria-pressed", String(isCollapsed));
   togglePanelBtn.title = isCollapsed ? "Show adjustments panel" : "Hide adjustments panel";
   togglePanelBtn.setAttribute("aria-label", togglePanelBtn.title);
+  togglePanelLabel.textContent = isCollapsed ? "Show panel" : "Hide panel";
   requestAnimationFrame(() => {
     if (!state.imageId) return;
     fitPreviewToPane();
@@ -1121,7 +1168,7 @@ applyEnhancementBtn.addEventListener("click", () => {
 function updateEnhancementStrengthVisibility() {
   const isRealESRGAN = enhancement.value === "realesrgan_x4plus";
   enhancementStrengthField.hidden = isRealESRGAN;
-  enhancementStrength.disabled = isRealESRGAN;
+  enhancementStrength.disabled = isRealESRGAN || !state.imageId;
 }
 
 enhancement.addEventListener("change", updateEnhancementStrengthVisibility);

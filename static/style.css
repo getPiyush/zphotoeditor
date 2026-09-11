@@ -23,7 +23,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: 8px 8px 0px 8px;
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
@@ -32,7 +32,19 @@ body {
 
 .brand-logo { height: 18px; width: auto; display: block; }
 
-.topbar-actions { display: flex; gap: 8px; align-items: center; }
+.topbar-actions { display: flex; gap: 6.4px; align-items: center; }
+
+/* Top toolbar controls at 80% of the base .btn/.icon-btn/.icon sizing. */
+.topbar-actions .btn {
+  padding: 6.4px 11.2px;
+  border-radius: 4.8px;
+  font-size: 11.2px;
+}
+
+.topbar-actions .icon {
+  width: 14.4px;
+  height: 14.4px;
+}
 
 .btn {
   display: inline-block;
@@ -49,6 +61,9 @@ body {
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.secondary { background: transparent; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* .icon-btn's own `display` would otherwise beat the UA [hidden] rule and
+   keep a "hidden" button visible (e.g. downloadBtn before the first save). */
+.btn[hidden] { display: none; }
 
 .icon-btn {
   display: inline-flex;
@@ -56,6 +71,17 @@ body {
   justify-content: center;
   padding: 8px;
   line-height: 0;
+}
+
+.topbar-actions .icon-btn {
+  padding: 6.4px 9.6px;
+  gap: 4.8px;
+  line-height: normal;
+}
+
+.btn-label {
+  font-size: 10.4px;
+  white-space: nowrap;
 }
 
 .icon {
@@ -126,6 +152,8 @@ body {
   padding: 0;
 }
 
+#preview[hidden] { display: none; }
+
 #preview {
   display: block;
   width: auto;
@@ -143,12 +171,6 @@ body {
   user-drag: none;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
   margin: 0;
-}
-
-#preview.empty-preview {
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
 }
 
 .initial-preview-text {
@@ -325,7 +347,7 @@ body {
   border: 0;
   color: var(--text);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 10.4px; /* matches the top toolbar's .btn-label size */
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -335,6 +357,19 @@ body {
 .accordion-header .chevron {
   color: var(--muted);
   transition: transform 0.2s ease;
+}
+
+.accordion-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.accordion-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+  flex-shrink: 0;
 }
 
 .accordion-item.open .accordion-header .chevron {
@@ -372,18 +407,23 @@ fieldset .btn { width: 100%; margin-top: 6px; }
 }
 
 .zoom-controls .btn,
-.rotate-controls .btn,
+.transform-controls .btn,
 .crop-mode-controls .btn {
   flex: 1;
   min-width: 0;
   margin-top: 0;
 }
 
-.rotate-controls,
+.transform-controls,
 .crop-mode-controls {
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+
+.transform-controls {
+  margin-top: 0;
+  margin-bottom: 8px;
 }
 
 .crop-mode-controls .btn.active {
