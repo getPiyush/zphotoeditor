@@ -2,6 +2,8 @@ const fileInput = document.getElementById("fileInput");
 const resetBtn = document.getElementById("resetBtn");
 const saveBtn = document.getElementById("saveBtn");
 const downloadBtn = document.getElementById("downloadBtn");
+const togglePanelBtn = document.getElementById("togglePanelBtn");
+const layout = document.querySelector(".layout");
 const dropHint = document.getElementById("dropHint");
 const imageWrap = document.getElementById("imageWrap");
 const preview = document.getElementById("preview");
@@ -12,9 +14,11 @@ const clearCropBtn = document.getElementById("clearCropBtn");
 const cropDragBtn = document.getElementById("cropDragBtn");
 const cropSelectBtn = document.getElementById("cropSelectBtn");
 const applyResizeBtn = document.getElementById("applyResizeBtn");
+const applyEnhancementBtn = document.getElementById("applyEnhancementBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
 const resetZoomBtn = document.getElementById("resetZoomBtn");
+const actualSizeBtn = document.getElementById("actualSizeBtn");
 const rotateLeftBtn = document.getElementById("rotateLeftBtn");
 const rotateRightBtn = document.getElementById("rotateRightBtn");
 const zoomLevelEl = document.getElementById("zoomLevel");
@@ -22,8 +26,28 @@ const resizeW = document.getElementById("resizeW");
 const resizeH = document.getElementById("resizeH");
 const lockAspect = document.getElementById("lockAspect");
 const enhancement = document.getElementById("enhancement");
+const enhancementStrength = document.getElementById("enhancementStrength");
+const enhancementStrengthField = document.getElementById("enhancementStrengthField");
+const enhancementStrengthOutput = document.getElementById("enhancementStrengthOutput");
 const statusEl = document.getElementById("status");
 const historyList = document.getElementById("historyList");
+const historyBackBtn = document.getElementById("historyBackBtn");
+const historyForwardBtn = document.getElementById("historyForwardBtn");
+const historyResetBtn = document.getElementById("historyResetBtn");
+const importHistoryBtn = document.getElementById("importHistoryBtn");
+const exportHistoryBtn = document.getElementById("exportHistoryBtn");
+const historyFileInput = document.getElementById("historyFileInput");
+const historyImportDialog = document.getElementById("historyImportDialog");
+const historyImportMode = document.getElementById("historyImportMode");
+const historyImportFilter = document.getElementById("historyImportFilter");
+const historyImportExcludeRealesrgan = document.getElementById("historyImportExcludeRealesrgan");
+const historyExportDialog = document.getElementById("historyExportDialog");
+const historyExportFileName = document.getElementById("historyExportFileName");
+const historyExportExcludeRealesrgan = document.getElementById("historyExportExcludeRealesrgan");
+const enhanceProgress = document.getElementById("enhanceProgress");
+const enhanceProgressText = document.getElementById("enhanceProgressText");
+const enhanceProgressFill = document.getElementById("enhanceProgressFill");
+const enhanceCancelBtn = document.getElementById("enhanceCancelBtn");
 const initialPreviewSrc = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='420' viewBox='0 0 640 420'%3E%3Crect width='640' height='420' fill='%23000'/%3E%3C/svg%3E";
 
 const SLIDER_LABELS = {
@@ -35,6 +59,9 @@ const SLIDER_LABELS = {
   shadows: "Shadows",
   saturation: "Saturation",
   vibrance: "Vibrance",
+  warmth: "Warmth",
+  pop: "Pop",
+  vignette: "Vignette",
   r: "Red channel",
   g: "Green channel",
   b: "Blue channel",
@@ -49,6 +76,9 @@ const sliders = [
   "shadows",
   "saturation",
   "vibrance",
+  "warmth",
+  "pop",
+  "vignette",
   "r",
   "g",
   "b",
@@ -73,11 +103,14 @@ let state = {
   zoom: 1,
   panX: 0,
   panY: 0,
+  actualSize: false,
   cropMode: "drag",
   history: [], // committed steps after the original: [{id, timestamp, label}]
   currentStepId: null, // null means the current source is the original
   sliderBaseline: neutralSliderValues(), // value already baked into the current source, per slider
   historySliderValues: {}, // stepId -> the absolute slider values baked in as of that step
+  historyUndo: [],
+  historyRedo: [],
 };
 
 preview.src = initialPreviewSrc;
@@ -87,14 +120,19 @@ imageWrap.hidden = false;
 dropHint.hidden = true;
 
 function neutralSliderValues() {
-  return Object.fromEntries(sliders.map((s) => [s.id, 1]));
+  return Object.fromEntries(sliders.map((s) => [s.id, ["warmth", "vignette"].includes(s.id) ? 0 : 1]));
+}
+
+function sliderAdjustment(id, raw, baseline) {
+  return ["warmth", "vignette"].includes(id) ? raw - baseline : raw / baseline;
 }
 
 function applySliderValues(values) {
   sliders.forEach((s) => {
-    const v = values[s.id] ?? 1;
+    const v = values[s.id] ?? neutralSliderValues()[s.id];
     s.value = v;
-    document.querySelector(`[data-out="${s.id}"]`).textContent = v.toFixed(2);
+    const output = document.querySelector(`[data-out="${s.id}"]`);
+    if (output) output.textContent = v.toFixed(2);
     state.sliderBaseline[s.id] = v;
   });
 }
@@ -131,8 +169,13 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function minimumZoom() {
+  const displayedWidth = preview.offsetWidth || preview.getBoundingClientRect().width || state.naturalWidth || 100;
+  return Math.min(1, 100 / Math.max(100, displayedWidth));
+}
+
 function applyPreviewTransform() {
-  const zoom = clamp(state.zoom, 1, 6);
+  const zoom = clamp(state.zoom, minimumZoom(), 6);
   state.zoom = zoom;
   preview.style.transformOrigin = "0 0";
   preview.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${zoom}) rotate(0deg)`;
@@ -154,15 +197,30 @@ function setCropMode(mode) {
 }
 
 function resetZoomState() {
+  state.actualSize = false;
   state.zoom = 1;
   state.panX = 0;
   state.panY = 0;
+  fitPreviewToPane();
+  applyPreviewTransform();
+}
+
+function showActualSize() {
+  if (!state.imageId || !state.naturalWidth || !state.naturalHeight) return;
+  state.actualSize = true;
+  state.zoom = 1;
+  state.panX = 0;
+  state.panY = 0;
+  preview.style.width = `${state.naturalWidth}px`;
+  preview.style.height = `${state.naturalHeight}px`;
+  preview.style.maxWidth = "none";
+  preview.style.maxHeight = "none";
   applyPreviewTransform();
 }
 
 function changeZoom(delta) {
   if (!state.imageId) return;
-  const nextZoom = clamp(state.zoom * delta, 1, 6);
+  const nextZoom = clamp(state.zoom * delta, minimumZoom(), 6);
   if (nextZoom === state.zoom) return;
   state.zoom = nextZoom;
   applyPreviewTransform();
@@ -175,6 +233,13 @@ function setStatus(text, modal = false) {
 
 function fitPreviewToPane() {
   if (!state.naturalWidth || !state.naturalHeight) return;
+  if (state.actualSize) {
+    preview.style.width = `${state.naturalWidth}px`;
+    preview.style.height = `${state.naturalHeight}px`;
+    preview.style.maxWidth = "none";
+    preview.style.maxHeight = "none";
+    return;
+  }
   const wrapRect = imageWrap.getBoundingClientRect();
   const maxWidth = Math.max(1, wrapRect.width || 1);
   const maxHeight = Math.max(1, wrapRect.height || 1);
@@ -206,7 +271,7 @@ function currentParams() {
   for (const s of sliders) {
     const raw = parseFloat(s.value);
     const baseline = state.sliderBaseline[s.id];
-    params[s.id] = raw / baseline;
+    params[s.id] = sliderAdjustment(s.id, raw, baseline);
   }
   return params;
 }
@@ -239,6 +304,48 @@ async function commitStep(params, label, showModal = false) {
   setStatus("");
 }
 
+function historySnapshot() {
+  return {
+    steps: state.history.map((step) => ({ ...step, params: { ...step.params } })),
+    activeStepId: state.currentStepId,
+  };
+}
+
+function updateHistoryTrackButtons() {
+  historyBackBtn.disabled = state.historyUndo.length === 0;
+  historyForwardBtn.disabled = state.historyRedo.length === 0;
+}
+
+function applyHistoryResponse(data) {
+  state.history = data.history;
+  state.currentStepId = data.current ? data.current.id : null;
+  state.naturalWidth = data.width;
+  state.naturalHeight = data.height;
+  state.aspectRatio = data.width / data.height;
+  resizeW.value = data.width;
+  resizeH.value = data.height;
+  applySliderValues(neutralSliderValues());
+  renderHistory();
+  requestPreview();
+}
+
+async function restoreHistorySnapshot(snapshot) {
+  const res = await fetch(`/history/${state.imageId}/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ steps: snapshot.steps, active_step_id: snapshot.activeStepId }),
+  });
+  if (!res.ok) return false;
+  applyHistoryResponse(await res.json());
+  return true;
+}
+
+function recordHistoryStructureChange() {
+  state.historyUndo.push(historySnapshot());
+  state.historyRedo = [];
+  updateHistoryTrackButtons();
+}
+
 function renderHistory() {
   historyList.innerHTML = "";
   const activeId = state.currentStepId || "original";
@@ -250,11 +357,123 @@ function renderHistory() {
 
   items.forEach((item) => {
     const li = document.createElement("li");
-    li.textContent = item.label;
+    li.draggable = item.id !== "original";
+    li.dataset.historyId = item.id;
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    li.appendChild(label);
     li.className = "history-item" + (item.id === activeId ? " active" : "");
-    li.addEventListener("click", () => revertTo(item.id));
+    if (item.id !== "original") {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "history-delete";
+      remove.title = `Delete ${item.label}`;
+      remove.setAttribute("aria-label", `Delete ${item.label}`);
+      remove.textContent = "×";
+      remove.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteHistoryItem(item.id);
+      });
+      li.appendChild(remove);
+    }
+    li.addEventListener("click", (event) => {
+      if (!event.target.closest(".history-delete")) revertTo(item.id);
+    });
     historyList.appendChild(li);
   });
+  updateHistoryTrackButtons();
+}
+
+let draggedHistoryId = null;
+historyList.addEventListener("dragstart", (event) => {
+  const item = event.target.closest(".history-item");
+  if (!item || item.dataset.historyId === "original") return;
+  draggedHistoryId = item.dataset.historyId;
+  item.classList.add("dragging");
+  event.dataTransfer.effectAllowed = "move";
+});
+historyList.addEventListener("dragend", (event) => {
+  event.target.closest(".history-item")?.classList.remove("dragging");
+  draggedHistoryId = null;
+});
+historyList.addEventListener("dragover", (event) => event.preventDefault());
+historyList.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  const target = event.target.closest(".history-item");
+  if (!target || !draggedHistoryId || target.dataset.historyId === "original" || target.dataset.historyId === draggedHistoryId) return;
+  const ids = state.history.map((step) => step.id);
+  const from = ids.indexOf(draggedHistoryId);
+  const to = ids.indexOf(target.dataset.historyId);
+  ids.splice(from, 1);
+  ids.splice(to, 0, draggedHistoryId);
+  await reorderHistory(ids);
+});
+
+async function reorderHistory(ids) {
+  recordHistoryStructureChange();
+  const res = await fetch(`/history/${state.imageId}/reorder`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) {
+    state.historyUndo.pop();
+    updateHistoryTrackButtons();
+    setStatus("Could not reorder history");
+    return;
+  }
+  applyHistoryResponse(await res.json());
+}
+
+async function deleteHistoryItem(stepId) {
+  recordHistoryStructureChange();
+  const res = await fetch(`/history/${state.imageId}/delete/${stepId}`, { method: "POST" });
+  if (!res.ok) {
+    state.historyUndo.pop();
+    updateHistoryTrackButtons();
+    setStatus("Could not delete history step");
+    return;
+  }
+  applyHistoryResponse(await res.json());
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function closeHistoryImportDialog() {
+  historyImportDialog.hidden = true;
+}
+
+function closeHistoryExportDialog() {
+  historyExportDialog.hidden = true;
+}
+
+async function importHistory(file, mode, filter, excludeRealesrgan) {
+  const form = new FormData();
+  form.append("history", file);
+  form.append("mode", mode);
+  form.append("filter", filter);
+  form.append("exclude_realesrgan", excludeRealesrgan ? "true" : "false");
+  setStatus("Importing history...", true);
+  const res = await fetch(`/history/${state.imageId}/import`, { method: "POST", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    setStatus(data.error || "History import failed");
+    return;
+  }
+
+  applyHistoryResponse(data);
+  state.historyUndo = [];
+  state.historyRedo = [];
+  if (data.saved_download_url) {
+    const saved = await fetch(data.saved_download_url);
+    if (saved.ok) downloadBlob(await saved.blob(), "zphotoeditor-existing-settings.json");
+  }
+  setStatus("");
 }
 
 async function revertTo(stepId) {
@@ -273,17 +492,8 @@ async function revertTo(stepId) {
     return;
   }
   const data = await res.json();
-  state.history = data.history;
-  state.currentStepId = data.current ? data.current.id : null;
-  state.naturalWidth = data.width;
-  state.naturalHeight = data.height;
-  state.aspectRatio = data.width / data.height;
-  resizeW.value = data.width;
-  resizeH.value = data.height;
-  applySliderValues(stepId === "original" ? neutralSliderValues() : state.historySliderValues[stepId] || neutralSliderValues());
+  applyHistoryResponse(data);
   cropBox.hidden = true;
-  renderHistory();
-  requestPreview();
   setStatus("");
 }
 
@@ -347,7 +557,7 @@ function commitAdjustments() {
   for (const s of sliders) {
     const raw = parseFloat(s.value);
     const baseline = state.sliderBaseline[s.id];
-    params[s.id] = raw / baseline;
+    params[s.id] = sliderAdjustment(s.id, raw, baseline);
     if (raw !== baseline) changed.push(`${SLIDER_LABELS[s.id] || s.id} ${raw.toFixed(2)}`);
   }
   if (!changed.length) return;
@@ -357,7 +567,8 @@ function commitAdjustments() {
 
 sliders.forEach((s) => {
   s.addEventListener("input", () => {
-    document.querySelector(`[data-out="${s.id}"]`).textContent = parseFloat(s.value).toFixed(2);
+    const output = document.querySelector(`[data-out="${s.id}"]`);
+    if (output) output.textContent = parseFloat(s.value).toFixed(2);
     requestPreview();
   });
   s.addEventListener("change", () => {
@@ -392,11 +603,14 @@ fileInput.addEventListener("change", async () => {
     zoom: 1,
     panX: 0,
     panY: 0,
+    actualSize: false,
     cropMode: "drag",
     history: [],
     currentStepId: null,
     sliderBaseline: neutralSliderValues(),
     historySliderValues: {},
+    historyUndo: [],
+    historyRedo: [],
   };
 
   applySliderValues(neutralSliderValues());
@@ -418,6 +632,7 @@ fileInput.addEventListener("change", async () => {
   applyCropBtn.disabled = false;
   clearCropBtn.disabled = false;
   applyResizeBtn.disabled = false;
+  applyEnhancementBtn.disabled = false;
   downloadBtn.hidden = false;
   setStatus("");
 });
@@ -430,6 +645,7 @@ resetBtn.addEventListener("click", () => {
 zoomInBtn.addEventListener("click", () => changeZoom(1.2));
 zoomOutBtn.addEventListener("click", () => changeZoom(1 / 1.2));
 resetZoomBtn.addEventListener("click", resetZoomState);
+actualSizeBtn.addEventListener("click", showActualSize);
 rotateLeftBtn.addEventListener("click", () => {
   if (!state.imageId) return;
   commitStep({ rotation: -90 }, "Rotate left");
@@ -445,7 +661,7 @@ imageWrap.addEventListener("wheel", (e) => {
   e.preventDefault();
   const delta = e.deltaY < 0 ? 1.12 : 1 / 1.12;
   const previousZoom = state.zoom;
-  const nextZoom = clamp(previousZoom * delta, 1, 6);
+  const nextZoom = clamp(previousZoom * delta, minimumZoom(), 6);
   if (nextZoom === previousZoom) return;
   state.zoom = nextZoom;
   applyPreviewTransform();
@@ -488,6 +704,109 @@ saveBtn.addEventListener("click", async () => {
 downloadBtn.addEventListener("click", (e) => {
   e.preventDefault();
   downloadCurrentImage();
+});
+
+importHistoryBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  historyFileInput.click();
+});
+
+historyFileInput.addEventListener("change", () => {
+  const file = historyFileInput.files[0];
+  historyFileInput.value = "";
+  if (!file) return;
+  historyImportDialog.hidden = false;
+  historyImportMode.value = "replace";
+  historyImportFilter.value = "none";
+  historyImportExcludeRealesrgan.checked = true;
+  historyImportDialog.dataset.fileName = file.name;
+  historyImportDialog._file = file;
+});
+
+historyImportDialog.addEventListener("click", (event) => {
+  if (event.target === historyImportDialog) {
+    closeHistoryImportDialog();
+    return;
+  }
+  const mode = event.target.closest("[data-history-mode]")?.dataset.historyMode;
+  if (!mode) return;
+  const file = historyImportDialog._file;
+  closeHistoryImportDialog();
+  if (mode === "import" && file) {
+    importHistory(file, historyImportMode.value, historyImportFilter.value, historyImportExcludeRealesrgan.checked);
+  }
+});
+
+exportHistoryBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  historyExportFileName.value = "zphotoeditor-settings.json";
+  historyExportExcludeRealesrgan.checked = true;
+  historyExportDialog.hidden = false;
+});
+
+historyExportDialog.addEventListener("click", async (event) => {
+  if (event.target === historyExportDialog) {
+    closeHistoryExportDialog();
+    return;
+  }
+  const mode = event.target.closest("[data-history-mode]")?.dataset.historyMode;
+  if (!mode) return;
+  const requestedName = historyExportFileName.value.trim() || "zphotoeditor-settings.json";
+  const excludeRealesrgan = historyExportExcludeRealesrgan.checked;
+  closeHistoryExportDialog();
+  if (mode !== "export") return;
+
+  const filename = requestedName.toLowerCase().endsWith(".json") ? requestedName : `${requestedName}.json`;
+  setStatus("Exporting history...");
+  const res = await fetch(`/history/${state.imageId}/export?exclude_realesrgan=${excludeRealesrgan}`);
+  if (!res.ok) {
+    setStatus("History export failed");
+    return;
+  }
+  downloadBlob(await res.blob(), filename);
+  setStatus("");
+});
+
+historyBackBtn.addEventListener("click", async () => {
+  const previous = state.historyUndo.pop();
+  if (!previous) return;
+  state.historyRedo.push(historySnapshot());
+  if (!await restoreHistorySnapshot(previous)) {
+    state.historyRedo.pop();
+    state.historyUndo.push(previous);
+    setStatus("Could not step back");
+  }
+  updateHistoryTrackButtons();
+});
+
+historyForwardBtn.addEventListener("click", async () => {
+  const next = state.historyRedo.pop();
+  if (!next) return;
+  state.historyUndo.push(historySnapshot());
+  if (!await restoreHistorySnapshot(next)) {
+    state.historyUndo.pop();
+    state.historyRedo.push(next);
+    setStatus("Could not step forward");
+  }
+  updateHistoryTrackButtons();
+});
+
+historyResetBtn.addEventListener("click", () => {
+  state.historyUndo = [];
+  state.historyRedo = [];
+  updateHistoryTrackButtons();
+});
+
+togglePanelBtn.addEventListener("click", () => {
+  const isCollapsed = layout.classList.toggle("panel-collapsed");
+  togglePanelBtn.setAttribute("aria-pressed", String(isCollapsed));
+  togglePanelBtn.title = isCollapsed ? "Show adjustments panel" : "Hide adjustments panel";
+  togglePanelBtn.setAttribute("aria-label", togglePanelBtn.title);
+  requestAnimationFrame(() => {
+    if (!state.imageId) return;
+    fitPreviewToPane();
+    if (state.zoom > 1) applyPreviewTransform();
+  });
 });
 
 // --- Crop drag selection ---
@@ -674,15 +993,139 @@ resizeH.addEventListener("input", () => {
   }
 });
 
+// --- Real-ESRGAN: runs as a polled background job so its progress can be
+// shown and the run can be cancelled, instead of blocking on one long request.
+let activeEnhanceJobId = null;
+
+async function runRealesrganEnhance(w, h, label) {
+  enhanceProgress.hidden = false;
+  enhanceProgressFill.style.width = "0%";
+  enhanceProgressText.textContent = "Starting Real-ESRGAN…";
+
+  const startRes = await fetch(`/enhance/${state.imageId}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resize: { w, h } }),
+  });
+  if (!startRes.ok) {
+    enhanceProgress.hidden = true;
+    setStatus("Failed to start enhancement");
+    return;
+  }
+  const { job_id: jobId } = await startRes.json();
+  activeEnhanceJobId = jobId;
+
+  const poll = async () => {
+    if (activeEnhanceJobId !== jobId) return;
+    const res = await fetch(`/enhance/${state.imageId}/status/${jobId}`);
+    if (!res.ok) {
+      activeEnhanceJobId = null;
+      enhanceProgress.hidden = true;
+      setStatus("Lost track of the enhancement job");
+      return;
+    }
+    const data = await res.json();
+
+    if (data.status === "running") {
+      const pct = data.tiles_total ? Math.round((data.tiles_done / data.tiles_total) * 100) : 0;
+      enhanceProgressFill.style.width = `${pct}%`;
+      enhanceProgressText.textContent = data.tiles_total
+        ? `Running Real-ESRGAN… tile ${data.tiles_done}/${data.tiles_total} (${data.elapsed.toFixed(1)}s)`
+        : `Running Real-ESRGAN… (${data.elapsed.toFixed(1)}s)`;
+      setTimeout(poll, 2000);
+      return;
+    }
+
+    if (data.status === "cancelled") {
+      activeEnhanceJobId = null;
+      enhanceProgress.hidden = true;
+      setStatus("Enhancement cancelled");
+      return;
+    }
+
+    if (data.status === "error") {
+      activeEnhanceJobId = null;
+      enhanceProgress.hidden = true;
+      setStatus(data.error || "Enhancement failed");
+      return;
+    }
+
+    // done: hand the result off to be committed as a history step
+    enhanceProgressFill.style.width = "100%";
+    enhanceProgressText.textContent = "Finishing…";
+    const finishRes = await fetch(`/enhance/${state.imageId}/finish/${jobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    activeEnhanceJobId = null;
+    enhanceProgress.hidden = true;
+    if (!finishRes.ok) {
+      const errData = await finishRes.json().catch(() => ({}));
+      setStatus(errData.error || "Failed to apply enhancement");
+      return;
+    }
+    const finishData = await finishRes.json();
+    state.history = finishData.history;
+    state.currentStepId = finishData.current ? finishData.current.id : null;
+    state.naturalWidth = finishData.width;
+    state.naturalHeight = finishData.height;
+    renderHistory();
+    requestPreview();
+    setStatus("");
+  };
+  poll();
+}
+
+enhanceCancelBtn.addEventListener("click", () => {
+  if (!activeEnhanceJobId || !state.imageId) return;
+  const jobId = activeEnhanceJobId;
+  const imageId = state.imageId;
+  // Close the modal immediately; the job is left to wind down on the server
+  // (it stops between tiles) without the UI waiting on that confirmation.
+  activeEnhanceJobId = null;
+  enhanceProgress.hidden = true;
+  setStatus("Enhancement cancelled");
+  fetch(`/enhance/${imageId}/cancel/${jobId}`, { method: "POST" });
+});
+
 applyResizeBtn.addEventListener("click", () => {
-  if (!state.imageId) return;
+  if (!state.imageId || activeEnhanceJobId) return;
   const w = parseInt(resizeW.value, 10);
   const h = parseInt(resizeH.value, 10);
   if (!w || !h) return;
-  const algorithm = enhancement.value;
-  const label = algorithm === "none"
-    ? `Resize ${w}×${h}`
-    : `Resize ${w}×${h} + ${enhancement.options[enhancement.selectedIndex].text}`;
-  commitStep({ resize: { w, h }, enhancement: algorithm }, label, true);
-  enhancement.value = "none";
+  commitStep({ resize: { w, h } }, `Resize ${w}×${h}`, true);
 });
+
+applyEnhancementBtn.addEventListener("click", () => {
+  if (!state.imageId || activeEnhanceJobId) return;
+  const algorithm = enhancement.value;
+  if (algorithm === "none") return;
+  const strength = parseInt(enhancementStrength.value, 10);
+  const label = enhancement.options[enhancement.selectedIndex].text;
+
+  if (algorithm === "realesrgan_x4plus") {
+    // No explicit resize target here (that's the Resize section's job) -- keep
+    // the current dimensions, so this acts as a detail-recovering sharpen
+    // rather than also upscaling the output.
+    runRealesrganEnhance(state.naturalWidth, state.naturalHeight, label);
+  } else {
+    commitStep({ enhancement: algorithm, enhancement_strength: strength }, `${label} ${strength}%`, true);
+  }
+  enhancement.value = "none";
+  enhancementStrength.value = "100";
+  enhancementStrengthOutput.textContent = "100%";
+  updateEnhancementStrengthVisibility();
+});
+
+function updateEnhancementStrengthVisibility() {
+  const isRealESRGAN = enhancement.value === "realesrgan_x4plus";
+  enhancementStrengthField.hidden = isRealESRGAN;
+  enhancementStrength.disabled = isRealESRGAN;
+}
+
+enhancement.addEventListener("change", updateEnhancementStrengthVisibility);
+enhancementStrength.addEventListener("input", () => {
+  enhancementStrengthOutput.textContent = `${enhancementStrength.value}%`;
+});
+updateEnhancementStrengthVisibility();

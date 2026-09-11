@@ -1,8 +1,10 @@
 import io
+import json
 import math
 import os
 import shutil
 import threading
+import time
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -26,14 +28,43 @@ STEPS_DIR.mkdir(exist_ok=True)
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
 
-# In-memory edit history per image_id: [{"id", "timestamp", "filename", "label"}, ...]
-# The last entry (if any) is always the current source image for further edits.
+# In-memory edit history per image_id: [{"id", "timestamp", "label", "params"}, ...]
 HISTORY: dict[str, list[dict]] = {}
+ACTIVE_HISTORY_COUNT: dict[str, int] = {}
+
+# Cache of the fully-baked "source" image (original + replayed committed history
+# steps, no live-preview params) per image_id, keyed by the tuple of step ids that
+# produced it. Avoids replaying the whole history chain on every preview request.
+_SOURCE_CACHE: dict[str, tuple[tuple[str, ...], Image.Image]] = {}
 REALESRGAN_MODEL_URL = (
     "https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth"
 )
+REALESRGAN_TILE_SIZE = int(os.environ.get("REALESRGAN_TILE_SIZE", "400"))
+# How many same-shaped tiles to run through the model in one batched forward
+# call. In principle this uses an accelerator more efficiently (fewer, larger
+# ops) at the cost of a coarser cancellation granularity (a cancel waits for
+# the whole in-flight batch, not just one tile). In practice, measured on this
+# app's dev hardware (Apple MPS, torch 2.8), batching was a *regression*: ~7x
+# slower on a 900x1300 image, and 4-tile batches drove MPS to
+# "backend out of memory" after enough calls -- its allocator doesn't appear
+# to release tile memory between forward passes the way CUDA's does, so a
+# larger simultaneous allocation for a real batch dimension is much more
+# expensive there than the same work spread across sequential calls. Default
+# is 1 (batching disabled) until this is verified to actually help on a real
+# CUDA box; raise it only after measuring on the target hardware.
+REALESRGAN_BATCH_SIZE = max(1, int(os.environ.get("REALESRGAN_BATCH_SIZE", "1")))
 _realesrgan_lock = threading.Lock()
 _realesrgan_upsampler = None
+# Serializes actual model invocations: RealESRGANer stores per-call state (the
+# input/output tensors) on the shared upsampler instance, so two enhancements
+# can't safely run at once even though each runs in its own background thread.
+_realesrgan_run_lock = threading.Lock()
+
+# In-flight/completed background Real-ESRGAN jobs, keyed by job id. Lets the UI
+# poll progress and cancel a running enhancement instead of blocking a request
+# for however long the upscale takes.
+_ENHANCE_JOBS: dict[str, dict] = {}
+_ENHANCE_JOBS_LOCK = threading.Lock()
 
 
 def allowed_file(filename: str) -> bool:
@@ -52,9 +83,6 @@ def step_dir_path(image_id: str) -> Path:
 
 
 def current_source_path(image_id: str) -> Path:
-    steps = HISTORY.get(image_id) or []
-    if steps:
-        return step_dir_path(image_id) / steps[-1]["filename"]
     return original_path(image_id)
 
 
@@ -68,18 +96,34 @@ def clear_working_images() -> None:
         if d.is_dir():
             shutil.rmtree(d)
     HISTORY.clear()
+    ACTIVE_HISTORY_COUNT.clear()
+    _SOURCE_CACHE.clear()
 
 
-def add_history_step(image_id: str, img: Image.Image, label: str) -> dict:
-    d = step_dir_path(image_id)
-    d.mkdir(parents=True, exist_ok=True)
+def add_history_step(image_id: str, params: dict, label: str) -> dict:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     step_id = uuid.uuid4().hex[:8]
-    filename = f"{timestamp}_{step_id}.png"
-    img.save(d / filename, format="PNG")
-    entry = {"id": step_id, "timestamp": timestamp, "filename": filename, "label": label}
+    entry = {"id": step_id, "timestamp": timestamp, "label": label, "params": params}
     HISTORY.setdefault(image_id, []).append(entry)
     return entry
+
+
+def remove_history_steps(image_id: str) -> None:
+    HISTORY[image_id] = []
+    ACTIVE_HISTORY_COUNT[image_id] = 0
+
+
+def history_settings(image_id: str) -> dict:
+    return {
+        "format": "zphotoeditor-settings",
+        "version": 1,
+        "source_image_id": image_id,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "steps": [
+            {"label": step.get("label", "Edit"), "timestamp": step.get("timestamp", ""), "params": step.get("params", {})}
+            for step in HISTORY.get(image_id, [])
+        ],
+    }
 
 
 def apply_channel_balance(img: Image.Image, r: float, g: float, b: float) -> Image.Image:
@@ -93,6 +137,47 @@ def apply_channel_balance(img: Image.Image, r: float, g: float, b: float) -> Ima
     ]
     new_bands.extend(bands[len(new_bands):])
     return Image.merge(img.mode, new_bands)
+
+
+def resize_image(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    target_width, target_height = size
+    if target_width >= img.width and target_height >= img.height:
+        return img.resize(size, Image.Resampling.LANCZOS)
+
+    channels = np.array(img)
+    resized = cv2.resize(channels, size, interpolation=cv2.INTER_AREA)
+    return Image.fromarray(resized, mode=img.mode)
+
+
+def apply_warmth(img: Image.Image, warmth: float) -> Image.Image:
+    if warmth == 0:
+        return img
+    base = img.convert("RGBA") if img.mode == "RGBA" else img.convert("RGB")
+    red, green, blue = base.split()[:3]
+    red_factor = 1 + warmth * 0.35
+    blue_factor = 1 - warmth * 0.35
+    red = red.point(lambda p: max(0, min(255, int(p * red_factor))))
+    blue = blue.point(lambda p: max(0, min(255, int(p * blue_factor))))
+    channels = (red, green, blue)
+    if base.mode == "RGBA":
+        channels += (base.getchannel("A"),)
+    return Image.merge(base.mode, channels)
+
+
+def apply_vignette(img: Image.Image, amount: float) -> Image.Image:
+    if amount <= 0:
+        return img
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = np.array(img.convert("RGB"), dtype=np.float32)
+    height, width = base.shape[:2]
+    y, x = np.ogrid[:height, :width]
+    distance = np.sqrt(((x - (width - 1) / 2) / max(width / 2, 1)) ** 2 + ((y - (height - 1) / 2) / max(height / 2, 1)) ** 2)
+    mask = np.clip((distance - 0.35) / 0.65, 0, 1)
+    base *= 1 - (mask[..., None] * min(amount, 1) * 0.75)
+    result = Image.fromarray(np.uint8(np.clip(base, 0, 255)))
+    if alpha is not None:
+        result.putalpha(alpha)
+    return result
 
 
 def apply_exposure(img: Image.Image, exposure: float) -> Image.Image:
@@ -148,6 +233,26 @@ def normalize_orientation(img: Image.Image) -> Image.Image:
     return corrected
 
 
+def _select_realesrgan_device(torch_module):
+    """Pick the best available backend without assuming what machine this runs
+    on: an explicit REALESRGAN_DEVICE always wins (for the odd box where
+    auto-detection guesses wrong, or a multi-GPU host that needs e.g.
+    "cuda:1"), otherwise prefer CUDA, then Apple's MPS, then plain CPU.
+    `getattr` guards the MPS check because `torch.backends.mps` is only
+    present on newer torch builds -- older ones would otherwise raise
+    AttributeError here instead of falling back to CPU.
+    """
+    forced = os.environ.get("REALESRGAN_DEVICE")
+    if forced:
+        return torch_module.device(forced)
+    if torch_module.cuda.is_available():
+        return torch_module.device("cuda")
+    mps_backend = getattr(torch_module.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return torch_module.device("mps")
+    return torch_module.device("cpu")
+
+
 def get_realesrgan_upsampler():
     global _realesrgan_upsampler
     if _realesrgan_upsampler is not None:
@@ -187,14 +292,21 @@ def get_realesrgan_upsampler():
             num_grow_ch=32,
             scale=4,
         )
+        device = _select_realesrgan_device(torch)
         _realesrgan_upsampler = RealESRGANer(
             scale=4,
             model_path=str(model_path),
             model=model,
-            tile=0,
+            # Tiling (rather than one whole-image pass) is what lets a running
+            # enhancement report per-tile progress and be stopped between tiles.
+            tile=REALESRGAN_TILE_SIZE,
             tile_pad=10,
             pre_pad=0,
-            half=torch.cuda.is_available(),
+            # Half precision is only reliably fast/correct on CUDA; CPU has no
+            # real speed benefit from it and MPS's half support is inconsistent
+            # across torch versions, so both stay full precision.
+            half=device.type == "cuda",
+            device=device,
         )
         return _realesrgan_upsampler
 
@@ -204,7 +316,163 @@ def initialize_realesrgan() -> None:
     get_realesrgan_upsampler()
 
 
-def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
+def _tile_bounds(x: int, y: int, tile_size: int, tile_pad: int, width: int, height: int) -> tuple:
+    """Compute a tile's core region (the part it's responsible for in the
+    output) and its padded region (the part actually fed to the model, which
+    gives the model context beyond the tile edges so the seams blend). Both
+    shrink at the image border, where there's no neighboring pixel data to
+    pad with -- that's what makes border tiles a different shape from
+    interior ones."""
+    ofs_x = x * tile_size
+    ofs_y = y * tile_size
+    input_start_x = ofs_x
+    input_end_x = min(ofs_x + tile_size, width)
+    input_start_y = ofs_y
+    input_end_y = min(ofs_y + tile_size, height)
+    return (
+        input_start_x,
+        input_end_x,
+        input_start_y,
+        input_end_y,
+        max(input_start_x - tile_pad, 0),
+        min(input_end_x + tile_pad, width),
+        max(input_start_y - tile_pad, 0),
+        min(input_end_y + tile_pad, height),
+    )
+
+
+def _write_tile_output(upsampler, bounds: tuple, output_tile) -> None:
+    (
+        input_start_x, input_end_x, input_start_y, input_end_y,
+        input_start_x_pad, _input_end_x_pad, input_start_y_pad, _input_end_y_pad,
+    ) = bounds
+    scale = upsampler.scale
+    output_start_x_tile = (input_start_x - input_start_x_pad) * scale
+    output_end_x_tile = output_start_x_tile + (input_end_x - input_start_x) * scale
+    output_start_y_tile = (input_start_y - input_start_y_pad) * scale
+    output_end_y_tile = output_start_y_tile + (input_end_y - input_start_y) * scale
+    upsampler.output[:, :, input_start_y * scale:input_end_y * scale, input_start_x * scale:input_end_x * scale] = (
+        output_tile[:, :, output_start_y_tile:output_end_y_tile, output_start_x_tile:output_end_x_tile]
+    )
+
+
+def _realesrgan_enhance(upsampler, rgb: np.ndarray, outscale: float, on_tile=None, should_cancel=None):
+    """Run the RealESRGAN model over `rgb` (a plain RGB uint8 array) tile by
+    tile, matching what RealESRGANer.enhance() itself does, but exposing
+    progress (via on_tile(done, total)) and cooperative cancellation (via
+    should_cancel()) between tiles -- a single whole-image forward pass can't
+    be interrupted or report partial progress.
+
+    Same-shaped tiles (almost always the interior of the grid -- border tiles
+    are shaped differently, see `_tile_bounds`) are grouped into batches of up
+    to REALESRGAN_BATCH_SIZE and run through the model as one forward call.
+    RRDBNet has no batch-dependent layers (no batchnorm), so this is numerically
+    identical to running each tile alone, just far better at keeping a GPU (or
+    a multi-core CPU's own internal parallelism) fed -- one forward call over 4
+    tiles does more work per Python/dispatch round-trip than 4 separate calls.
+    The trade-off is cancellation latency: a cancel now waits for the current
+    *batch* to finish rather than the current tile, so REALESRGAN_BATCH_SIZE
+    also caps how unresponsive Cancel can get.
+
+    RealESRGANer.enhance() assumes its input is in cv2's BGR channel order (it
+    swaps to RGB internally to match how the model was trained, then swaps back
+    on the way out), because it's normally fed images loaded via cv2.imread.
+    Callers here instead have a true-RGB array from PIL, so it's converted to
+    BGR order before the call and the result converted back -- otherwise the
+    model runs on red/blue-swapped pixels and produces visibly wrong colors.
+
+    Runs under a module-level lock since the upsampler is a single shared
+    instance that stores per-call state (input/output tensors) on itself, so
+    two enhancements can't safely run at once. Returns None if cancelled.
+    """
+    import torch
+
+    with _realesrgan_run_lock:
+        if should_cancel and should_cancel():
+            return None
+
+        h_input, w_input = rgb.shape[:2]
+        bgr = rgb[:, :, ::-1].astype(np.float32) / 255.0
+        model_input = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+        upsampler.pre_process(model_input)
+        batch, channel, height, width = upsampler.img.shape
+        tile_size = upsampler.tile_size
+
+        if tile_size <= 0:
+            with torch.no_grad():
+                upsampler.output = upsampler.model(upsampler.img)
+        else:
+            tile_pad = upsampler.tile_pad
+            tiles_x = math.ceil(width / tile_size)
+            tiles_y = math.ceil(height / tile_size)
+            total_tiles = tiles_x * tiles_y
+            upsampler.output = upsampler.img.new_zeros(
+                (batch, channel, height * upsampler.scale, width * upsampler.scale)
+            )
+            if on_tile:
+                on_tile(0, total_tiles)
+
+            full_shape = (tile_size + 2 * tile_pad, tile_size + 2 * tile_pad)
+            done = 0
+            pending_bounds = []
+            pending_inputs = []
+
+            def flush_pending():
+                nonlocal done
+                if not pending_inputs:
+                    return
+                with torch.no_grad():
+                    batched_output = upsampler.model(torch.cat(pending_inputs, dim=0))
+                for i, bounds in enumerate(pending_bounds):
+                    _write_tile_output(upsampler, bounds, batched_output[i:i + 1])
+                done += len(pending_bounds)
+                if on_tile:
+                    on_tile(done, total_tiles)
+                pending_bounds.clear()
+                pending_inputs.clear()
+
+            for y in range(tiles_y):
+                for x in range(tiles_x):
+                    if should_cancel and should_cancel():
+                        return None
+                    bounds = _tile_bounds(x, y, tile_size, tile_pad, width, height)
+                    _, _, _, _, sx_pad, ex_pad, sy_pad, ey_pad = bounds
+                    input_tile = upsampler.img[:, :, sy_pad:ey_pad, sx_pad:ex_pad]
+
+                    if (ey_pad - sy_pad, ex_pad - sx_pad) == full_shape:
+                        pending_bounds.append(bounds)
+                        pending_inputs.append(input_tile)
+                        if len(pending_bounds) >= REALESRGAN_BATCH_SIZE:
+                            flush_pending()
+                    else:
+                        # A border/remainder tile has a different shape than the
+                        # pending batch, so it can't be concatenated with it.
+                        flush_pending()
+                        if should_cancel and should_cancel():
+                            return None
+                        with torch.no_grad():
+                            output_tile = upsampler.model(input_tile)
+                        _write_tile_output(upsampler, bounds, output_tile)
+                        done += 1
+                        if on_tile:
+                            on_tile(done, total_tiles)
+            if should_cancel and should_cancel():
+                return None
+            flush_pending()
+
+        output_tensor = upsampler.post_process()
+        output_img = output_tensor.data.squeeze().float().cpu().clamp_(0, 1).numpy()
+        output_img = np.transpose(output_img[[2, 1, 0], :, :], (1, 2, 0))
+        output_bgr = (output_img * 255.0).round().astype(np.uint8)
+        if outscale != float(upsampler.scale):
+            output_bgr = cv2.resize(
+                output_bgr, (int(w_input * outscale), int(h_input * outscale)), interpolation=cv2.INTER_LANCZOS4
+            )
+        return output_bgr[:, :, ::-1]
+
+
+def apply_enhancement(img: Image.Image, algorithm: str, strength: float = 100) -> Image.Image:
     if algorithm == "none":
         return img
 
@@ -216,6 +484,11 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
         lightness, a_channel, b_channel = cv2.split(lab)
         lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(lightness)
         enhanced = cv2.cvtColor(cv2.merge((lightness, a_channel, b_channel)), cv2.COLOR_LAB2RGB)
+    elif algorithm == "blur":
+        enhanced = cv2.GaussianBlur(rgb, (0, 0), 1.5)
+    elif algorithm == "edge":
+        laplacian = cv2.Laplacian(rgb, cv2.CV_32F, ksize=3)
+        enhanced = np.clip(rgb.astype(np.float32) - 0.7 * laplacian, 0, 255).astype(np.uint8)
     elif algorithm == "filter2d":
         kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
         enhanced = cv2.filter2D(rgb, -1, kernel)
@@ -227,9 +500,13 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
     elif algorithm == "detail":
         enhanced = cv2.detailEnhance(rgb, sigma_s=10, sigma_r=0.15)
     elif algorithm == "realesrgan_x4plus":
-        enhanced, _ = get_realesrgan_upsampler().enhance(rgb, outscale=4)
+        enhanced = _realesrgan_enhance(get_realesrgan_upsampler(), rgb, outscale=4)
     else:
         return img
+
+    if algorithm != "realesrgan_x4plus":
+        strength = max(0, min(100, float(strength))) / 100
+        enhanced = cv2.addWeighted(rgb, 1 - strength, enhanced, strength, 0)
 
     result = Image.fromarray(enhanced)
     if alpha is not None:
@@ -238,7 +515,11 @@ def apply_enhancement(img: Image.Image, algorithm: str) -> Image.Image:
 
 
 def process_image(source: Path, params: dict) -> Image.Image:
-    img = Image.open(source)
+    with Image.open(source) as source_image:
+        return process_image_object(source_image.copy(), params)
+
+
+def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     img = normalize_orientation(img)
     img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
 
@@ -252,10 +533,21 @@ def process_image(source: Path, params: dict) -> Image.Image:
         img = img.crop((x, y, x + w, y + h))
 
     resize = params.get("resize")
-    if resize and resize.get("w") and resize.get("h"):
-        img = img.resize((int(resize["w"]), int(resize["h"])), Image.LANCZOS)
+    enhancement_algorithm = params.get("enhancement", "none")
+    enhancement_strength = params.get("enhancement_strength", 100)
 
-    img = apply_enhancement(img, params.get("enhancement", "none"))
+    if enhancement_algorithm == "realesrgan_x4plus":
+        # The network always upscales by a fixed 4x, so running it on an
+        # already-resized image would blow the output past the requested
+        # dimensions and waste most of the compute. Super-resolve at the
+        # pre-resize size instead, then resize its output to the exact target.
+        img = apply_enhancement(img, enhancement_algorithm, enhancement_strength)
+        if resize and resize.get("w") and resize.get("h"):
+            img = resize_image(img, (int(resize["w"]), int(resize["h"])))
+    else:
+        if resize and resize.get("w") and resize.get("h"):
+            img = resize_image(img, (int(resize["w"]), int(resize["h"])))
+        img = apply_enhancement(img, enhancement_algorithm, enhancement_strength)
 
     brightness = float(params.get("brightness", 1.0))
     contrast = float(params.get("contrast", 1.0))
@@ -265,6 +557,9 @@ def process_image(source: Path, params: dict) -> Image.Image:
     shadows = float(params.get("shadows", 1.0))
     saturation = float(params.get("saturation", 1.0))
     vibrance = float(params.get("vibrance", 1.0))
+    warmth = float(params.get("warmth", 0.0))
+    pop = float(params.get("pop", 1.0))
+    vignette = float(params.get("vignette", 0.0))
     r = float(params.get("r", 1.0))
     g = float(params.get("g", 1.0))
     b = float(params.get("b", 1.0))
@@ -281,16 +576,59 @@ def process_image(source: Path, params: dict) -> Image.Image:
     if saturation != 1.0:
         img = ImageEnhance.Color(img).enhance(saturation)
     img = apply_vibrance(img, vibrance - 1.0)
+    img = apply_warmth(img, warmth)
+    if pop != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(pop)
+        img = ImageEnhance.Color(img).enhance(1 + (pop - 1) * 0.35)
     img = apply_channel_balance(img, r, g, b)
+    img = apply_vignette(img, vignette)
 
     preview = params.get("preview")
     if preview and preview.get("w") and preview.get("h"):
         max_w = int(preview["w"])
         max_h = int(preview["h"])
         if max_w > 0 and max_h > 0:
-            img.thumbnail((max_w, max_h), Image.LANCZOS)
+            scale = min(max_w / img.width, max_h / img.height, 1)
+            if scale < 1:
+                img = resize_image(img, (max(1, round(img.width * scale)), max(1, round(img.height * scale))))
 
     return img
+
+
+def _replay(image: Image.Image, steps: list[dict], start: int, end: int) -> Image.Image:
+    for step in steps[start:end]:
+        image = process_image_object(image, step.get("params", {}))
+    return image
+
+
+def current_source_image(image_id: str, steps=None) -> Image.Image:
+    """Return the original image with committed history steps replayed onto it.
+
+    Replaying the whole history chain on every call is the dominant cost for
+    preview requests once a few steps have been committed, since it re-runs every
+    prior PIL/OpenCV step just to render the current one. `_SOURCE_CACHE` keeps the
+    most recently rendered result per image, keyed by the ordered tuple of step ids
+    baked into it, so unrelated calls (e.g. slider preview requests between commits)
+    hit the cache instead of replaying, and a new commit only replays the one step
+    that was just added.
+    """
+    all_steps = HISTORY.get(image_id, [])
+    replay_steps = steps if steps is not None else all_steps[:ACTIVE_HISTORY_COUNT.get(image_id, len(all_steps))]
+    signature = tuple(step["id"] for step in replay_steps)
+
+    cached = _SOURCE_CACHE.get(image_id)
+    if cached and cached[0] == signature:
+        return cached[1].copy()
+
+    if cached and len(signature) > len(cached[0]) and signature[:len(cached[0])] == cached[0]:
+        image = _replay(cached[1].copy(), replay_steps, len(cached[0]), len(signature))
+    else:
+        with Image.open(original_path(image_id)) as source:
+            image = source.copy()
+        image = _replay(image, replay_steps, 0, len(signature))
+
+    _SOURCE_CACHE[image_id] = (signature, image)
+    return image.copy()
 
 
 @app.route("/")
@@ -337,7 +675,7 @@ def get_original(image_id):
 def process(image_id):
     params = request.get_json(force=True) or {}
     try:
-        img = process_image(current_source_path(image_id), params)
+        img = process_image_object(current_source_image(image_id), params)
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
 
@@ -347,72 +685,335 @@ def process(image_id):
     return send_file(buf, mimetype="image/png")
 
 
+def _commit_history_step(image_id: str, img: Image.Image, params: dict, label: str) -> dict:
+    """Record `img` (already the fully baked result of applying `params` to the
+    current source) as a new history step, and seed the source cache with it so
+    the next preview/history call doesn't have to replay this step again."""
+    entry = add_history_step(image_id, params, label)
+    ACTIVE_HISTORY_COUNT[image_id] = len(HISTORY[image_id])
+    signature = tuple(step["id"] for step in HISTORY[image_id][:ACTIVE_HISTORY_COUNT[image_id]])
+    _SOURCE_CACHE[image_id] = (signature, img)
+    return entry
+
+
 @app.route("/commit/<image_id>", methods=["POST"])
 def commit(image_id):
-    """Apply the given (incremental) edit to the current source image and
-    persist the result as a new history step, which becomes the new source."""
+    """Store settings for an edit; the source is replayed from the original."""
     params = request.get_json(force=True) or {}
     label = params.pop("label", "Edit")
     params.pop("preview", None)  # never bake the preview downscale into a step
 
     try:
-        img = process_image(current_source_path(image_id), params)
+        img = process_image_object(current_source_image(image_id), params)
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
-    entry = add_history_step(image_id, img, label)
+    entry = _commit_history_step(image_id, img, params, label)
     width, height = img.size
+
+    return jsonify(history=HISTORY[image_id], current=entry, width=width, height=height)
+
+
+@app.route("/enhance/<image_id>/start", methods=["POST"])
+def start_enhance(image_id):
+    """Kick off a Real-ESRGAN enhancement in a background thread and return a
+    job id immediately, instead of blocking the request for however long the
+    upscale takes. The UI polls /enhance/<image_id>/status/<job_id> for
+    progress and can stop it early via /enhance/<image_id>/cancel/<job_id>."""
+    original_path(image_id)  # 404s if the image doesn't exist
+    params = request.get_json(force=True) or {}
+    resize = params.get("resize")
+
+    job_id = uuid.uuid4().hex[:8]
+    cancel_event = threading.Event()
+    job = {
+        "image_id": image_id,
+        "status": "running",
+        "tiles_done": 0,
+        "tiles_total": 0,
+        "started": time.monotonic(),
+        "resize": resize,
+        "result": None,
+        "error": None,
+        "cancel_event": cancel_event,
+    }
+    with _ENHANCE_JOBS_LOCK:
+        _ENHANCE_JOBS[job_id] = job
+
+    def on_tile(done, total):
+        job["tiles_done"] = done
+        job["tiles_total"] = total
+
+    def run():
+        try:
+            base = current_source_image(image_id)
+            base = base.convert("RGB") if base.mode not in ("RGB", "RGBA") else base
+            alpha = base.getchannel("A") if base.mode == "RGBA" else None
+            rgb = np.array(base.convert("RGB"))
+            output = _realesrgan_enhance(
+                get_realesrgan_upsampler(), rgb, outscale=4, on_tile=on_tile, should_cancel=cancel_event.is_set
+            )
+            if output is None:
+                job["status"] = "cancelled"
+                return
+            result = Image.fromarray(output)
+            if alpha is not None:
+                result.putalpha(alpha)
+            job["result"] = result
+            job["status"] = "done"
+        except Exception as exc:  # background thread: surface it via job state, not an exception
+            job["error"] = str(exc)
+            job["status"] = "error"
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify(job_id=job_id)
+
+
+@app.route("/enhance/<image_id>/status/<job_id>")
+def enhance_status(image_id, job_id):
+    job = _ENHANCE_JOBS.get(job_id)
+    if not job or job["image_id"] != image_id:
+        abort(404, description="Enhancement job not found")
+    payload = {
+        "status": job["status"],
+        "tiles_done": job["tiles_done"],
+        "tiles_total": job["tiles_total"],
+        "elapsed": time.monotonic() - job["started"],
+    }
+    if job["status"] == "error":
+        payload["error"] = job["error"]
+    return jsonify(payload)
+
+
+@app.route("/enhance/<image_id>/cancel/<job_id>", methods=["POST"])
+def cancel_enhance(image_id, job_id):
+    job = _ENHANCE_JOBS.get(job_id)
+    if not job or job["image_id"] != image_id:
+        abort(404, description="Enhancement job not found")
+    job["cancel_event"].set()
+    return jsonify(status="cancelling")
+
+
+@app.route("/enhance/<image_id>/finish/<job_id>", methods=["POST"])
+def finish_enhance(image_id, job_id):
+    """Commit a completed enhancement job's result as a new history step."""
+    job = _ENHANCE_JOBS.get(job_id)
+    if not job or job["image_id"] != image_id:
+        abort(404, description="Enhancement job not found")
+    if job["status"] != "done":
+        return jsonify(error=f"Enhancement job is not finished (status: {job['status']})"), 409
+
+    img = job["result"]
+    resize = job.get("resize")
+    if resize and resize.get("w") and resize.get("h"):
+        img = resize_image(img, (int(resize["w"]), int(resize["h"])))
+
+    label = (request.get_json(force=True) or {}).get("label", "Enhance")
+    params = {"enhancement": "realesrgan_x4plus"}
+    if resize:
+        params["resize"] = resize
+    entry = _commit_history_step(image_id, img, params, label)
+    width, height = img.size
+
+    with _ENHANCE_JOBS_LOCK:
+        _ENHANCE_JOBS.pop(job_id, None)
 
     return jsonify(history=HISTORY[image_id], current=entry, width=width, height=height)
 
 
 @app.route("/revert/<image_id>", methods=["POST"])
 def revert(image_id):
-    """Make an earlier step (or the original) the current source again,
-    discarding the steps that came after it."""
+    """View an earlier step without discarding later settings."""
     data = request.get_json(force=True) or {}
     step_id = data.get("step_id") or "original"
     steps = HISTORY.get(image_id, [])
-    d = step_dir_path(image_id)
 
     if step_id == "original":
-        for step in steps:
-            (d / step["filename"]).unlink(missing_ok=True)
-        HISTORY[image_id] = []
-        with Image.open(original_path(image_id)) as img:
-            width, height = img.size
-        return jsonify(history=[], current=None, width=width, height=height)
+        ACTIVE_HISTORY_COUNT[image_id] = 0
+        with Image.open(original_path(image_id)) as image:
+            width, height = image.size
+        return jsonify(history=HISTORY.get(image_id, []), current=None, width=width, height=height)
 
     idx = next((i for i, s in enumerate(steps) if s["id"] == step_id), None)
     if idx is None:
         abort(404, description="Step not found")
 
-    for step in steps[idx + 1 :]:
-        (d / step["filename"]).unlink(missing_ok=True)
-    HISTORY[image_id] = steps[: idx + 1]
+    ACTIVE_HISTORY_COUNT[image_id] = idx + 1
 
-    with Image.open(d / steps[idx]["filename"]) as img:
-        width, height = img.size
+    with current_source_image(image_id) as image:
+        width, height = image.size
     return jsonify(history=HISTORY[image_id], current=HISTORY[image_id][idx], width=width, height=height)
+
+
+def history_state_response(image_id: str):
+    steps = HISTORY.get(image_id, [])
+    active_count = ACTIVE_HISTORY_COUNT.get(image_id, len(steps))
+    current = steps[active_count - 1] if active_count else None
+    with current_source_image(image_id) as image:
+        width, height = image.size
+    return jsonify(history=steps, current=current, width=width, height=height)
+
+
+@app.route("/history/<image_id>/reorder", methods=["POST"])
+def reorder_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    ids = (request.get_json(force=True) or {}).get("ids", [])
+    by_id = {step["id"]: step for step in HISTORY[image_id]}
+    if len(ids) != len(by_id) or set(ids) != set(by_id):
+        return jsonify(error="History order is invalid"), 400
+    HISTORY[image_id] = [by_id[step_id] for step_id in ids]
+    ACTIVE_HISTORY_COUNT[image_id] = len(HISTORY[image_id])
+    return history_state_response(image_id)
+
+
+@app.route("/history/<image_id>/delete/<step_id>", methods=["POST"])
+def delete_history_step(image_id, step_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    steps = HISTORY[image_id]
+    if not any(step["id"] == step_id for step in steps):
+        abort(404, description="Step not found")
+    HISTORY[image_id] = [step for step in steps if step["id"] != step_id]
+    ACTIVE_HISTORY_COUNT[image_id] = len(HISTORY[image_id])
+    return history_state_response(image_id)
+
+
+@app.route("/history/<image_id>/restore", methods=["POST"])
+def restore_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    data = request.get_json(force=True) or {}
+    steps = data.get("steps")
+    if not isinstance(steps, list) or any(
+        not isinstance(step, dict) or not isinstance(step.get("params"), dict) or not step.get("id")
+        for step in steps
+    ):
+        return jsonify(error="Invalid history state"), 400
+    HISTORY[image_id] = steps
+    active_id = data.get("active_step_id")
+    ACTIVE_HISTORY_COUNT[image_id] = next(
+        (index + 1 for index, step in enumerate(steps) if step["id"] == active_id),
+        len(steps),
+    ) if active_id else len(steps)
+    return history_state_response(image_id)
+
+
+def _is_realesrgan_step(params: dict) -> bool:
+    return params.get("enhancement") == "realesrgan_x4plus"
+
+
+def _bool_arg(value: str) -> bool:
+    return (value or "").strip().lower() in {"true", "1", "on", "yes"}
+
+
+@app.route("/history/<image_id>/export")
+def export_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    exclude_realesrgan = _bool_arg(request.args.get("exclude_realesrgan"))
+    settings = history_settings(image_id)
+    if exclude_realesrgan:
+        settings["steps"] = [step for step in settings["steps"] if not _is_realesrgan_step(step["params"])]
+    exported_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    payload = json.dumps(settings, indent=2).encode("utf-8")
+    return send_file(
+        io.BytesIO(payload),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=f"zphotoeditor-settings-{exported_at}.json",
+    )
+
+
+@app.route("/history/<image_id>/import", methods=["POST"])
+def import_history(image_id):
+    if image_id not in HISTORY:
+        abort(404, description="Image not found")
+    uploaded = request.files.get("history")
+    mode = request.form.get("mode", "replace")
+    settings_filter = request.form.get("filter", "none")
+    exclude_realesrgan = _bool_arg(request.form.get("exclude_realesrgan"))
+    if not uploaded or not uploaded.filename:
+        return jsonify(error="No history file provided"), 400
+    if mode not in {"before", "after", "replace", "save-replace"}:
+        return jsonify(error="Invalid history import mode"), 400
+    if settings_filter not in {"none", "crop", "resize", "crop-resize"}:
+        return jsonify(error="Invalid history settings filter"), 400
+
+    try:
+        manifest = json.loads(uploaded.read().decode("utf-8"))
+        if manifest.get("format") != "zphotoeditor-settings" or manifest.get("version") != 1:
+            raise ValueError("Unsupported settings file")
+        manifest_steps = manifest.get("steps", [])
+        imported_steps = []
+        for step in manifest_steps:
+            if not isinstance(step.get("params"), dict):
+                raise ValueError("Each history step must contain settings")
+            params = dict(step["params"])
+            if exclude_realesrgan and _is_realesrgan_step(params):
+                continue
+            if settings_filter in {"crop", "crop-resize"}:
+                params.pop("crop", None)
+            if settings_filter in {"resize", "crop-resize"}:
+                params.pop("resize", None)
+            imported_steps.append({
+                "id": uuid.uuid4().hex[:8],
+                "timestamp": step.get("timestamp") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"),
+                "label": step.get("label", "Imported edit"),
+                "params": params,
+            })
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, OSError) as exc:
+        return jsonify(error=f"Invalid history file: {exc}"), 400
+
+    saved_filename = None
+    if mode == "save-replace":
+        saved_filename = f"zphotoeditor-settings-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.json"
+        (SAVED_DIR / saved_filename).write_text(json.dumps(history_settings(image_id), indent=2), encoding="utf-8")
+
+    existing_steps = list(HISTORY.get(image_id, []))
+    if mode in {"replace", "save-replace"}:
+        remove_history_steps(image_id)
+        existing_steps = []
+
+    if mode == "before":
+        ordered = imported_steps + existing_steps
+    elif mode == "after":
+        ordered = existing_steps + imported_steps
+    else:
+        ordered = imported_steps
+    HISTORY[image_id] = ordered
+    ACTIVE_HISTORY_COUNT[image_id] = len(ordered)
+
+    current = ordered[-1] if ordered else None
+    with current_source_image(image_id) as image:
+        width, height = image.size
+    return jsonify(
+        history=ordered,
+        current=current,
+        width=width,
+        height=height,
+        saved_download_url=f"/download/{saved_filename}" if saved_filename else None,
+    )
 
 
 @app.route("/save/<image_id>", methods=["POST"])
 def save(image_id):
-    source = current_source_path(image_id)
     old_original = original_path(image_id)
     new_original = UPLOAD_DIR / f"{image_id}_original.png"
 
-    with Image.open(source) as img:
+    with current_source_image(image_id) as img:
         img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
         saved_name = f"{image_id}.png"
         img.save(SAVED_DIR / saved_name, format="PNG")
         img.save(new_original, format="PNG")
+        # new_original now holds exactly this image, so seed the cache for the
+        # post-save (empty-history) state instead of leaving it stale.
+        _SOURCE_CACHE[image_id] = ((), img.copy())
 
     if old_original != new_original:
         old_original.unlink(missing_ok=True)
 
-    for step in HISTORY.get(image_id, []):
-        (step_dir_path(image_id) / step["filename"]).unlink(missing_ok=True)
     HISTORY[image_id] = []
+    ACTIVE_HISTORY_COUNT[image_id] = 0
 
     return jsonify(saved=True, filename=saved_name, download_url=f"/download/{saved_name}")
 
@@ -431,4 +1032,4 @@ if __name__ == "__main__":
     # Initialize the model only in the process that serves requests.
     if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         initialize_realesrgan()
-    app.run(debug=debug, port=5000)
+    app.run(debug=debug, port=5000, threaded=True)
