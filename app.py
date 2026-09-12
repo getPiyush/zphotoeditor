@@ -224,6 +224,33 @@ def apply_exposure(img: Image.Image, exposure: float) -> Image.Image:
     return img.point(lambda p: max(0, min(255, int(p * exposure))))
 
 
+def _apply_color_lut(img: Image.Image, lut: list) -> Image.Image:
+    # img.point() needs one 256-entry table per band; apply the curve to color
+    # bands only and leave alpha (if any) untouched.
+    color_bands = min(len(img.getbands()), 3)
+    identity = list(range(256))
+    full_lut = lut * color_bands + identity * (len(img.getbands()) - color_bands)
+    return img.point(full_lut)
+
+
+def apply_alpha_beta(img: Image.Image, alpha: float, beta: float) -> Image.Image:
+    """Classic OpenCV-style linear correction: output = alpha * input + beta,
+    where alpha is the gain (contrast-like) and beta is the bias (brightness-like)."""
+    if alpha == 1.0 and beta == 0.0:
+        return img
+    lut = [max(0, min(255, int(round(i * alpha + beta)))) for i in range(256)]
+    return _apply_color_lut(img, lut)
+
+
+def apply_gamma(img: Image.Image, gamma: float) -> Image.Image:
+    """Power-law (gamma) correction: output = 255 * (input / 255) ** (1 / gamma)."""
+    if gamma == 1.0:
+        return img
+    inv_gamma = 1.0 / gamma
+    lut = [max(0, min(255, int(round(((i / 255.0) ** inv_gamma) * 255)))) for i in range(256)]
+    return _apply_color_lut(img, lut)
+
+
 # Per-tone-region weight curves (index = input 0-255 level), used to make
 # whites/blacks/shadows push a targeted part of the tonal range rather than
 # every pixel uniformly.
@@ -236,12 +263,36 @@ def apply_tone_region(img: Image.Image, amount: float, weights: list) -> Image.I
     if amount == 0:
         return img
     lut = [max(0, min(255, int(round(i + amount * 255 * weights[i])))) for i in range(256)]
-    # img.point() needs one 256-entry table per band; apply the curve to color
-    # bands only and leave alpha (if any) untouched.
-    color_bands = min(len(img.getbands()), 3)
-    identity = list(range(256))
-    full_lut = lut * color_bands + identity * (len(img.getbands()) - color_bands)
-    return img.point(full_lut)
+    return _apply_color_lut(img, lut)
+
+
+GRAYSCALE_CHANNEL_INDEX = {"red": 0, "green": 1, "blue": 2}
+
+
+def apply_grayscale(img: Image.Image, method: str, intensity: float) -> Image.Image:
+    """Convert to grayscale using the given method, then blend back toward the
+    original by (1 - intensity) so partial desaturation is possible."""
+    intensity = max(0.0, min(1.0, intensity))
+    if intensity <= 0:
+        return img
+
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = img.convert("RGB") if img.mode != "RGB" else img
+
+    if method == "average":
+        arr = np.array(base, dtype=np.float32).mean(axis=2, keepdims=True)
+        channel = Image.fromarray(np.uint8(np.clip(arr, 0, 255)).squeeze(axis=2))
+    elif method in GRAYSCALE_CHANNEL_INDEX:
+        channel = base.split()[GRAYSCALE_CHANNEL_INDEX[method]]
+    else:  # luminosity (default): ITU-R 601-2 perceptual weighting
+        channel = base.convert("L")
+
+    gray = Image.merge("RGB", (channel, channel, channel))
+    result = Image.blend(base, gray, intensity)
+    if alpha is not None:
+        result = result.convert("RGBA")
+        result.putalpha(alpha)
+    return result
 
 
 def apply_vibrance(img: Image.Image, amount: float) -> Image.Image:
@@ -260,6 +311,71 @@ def apply_vibrance(img: Image.Image, amount: float) -> Image.Image:
         result = result.convert("RGBA")
         result.putalpha(img.split()[3])
     return result
+
+
+# Standard sepia color matrix (each output channel is a fixed weighted mix of
+# the input R/G/B), applied as a matrix multiply rather than composed from the
+# warmth/tone sliders since it's a well-known, specific transform.
+SEPIA_MATRIX = np.array([
+    [0.393, 0.769, 0.189],
+    [0.349, 0.686, 0.168],
+    [0.272, 0.534, 0.131],
+], dtype=np.float32)
+
+
+def apply_sepia(img: Image.Image, intensity: float) -> Image.Image:
+    if intensity <= 0:
+        return img
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = img.convert("RGB") if img.mode != "RGB" else img
+    arr = np.array(base, dtype=np.float32)
+    sepia_arr = np.clip(arr @ SEPIA_MATRIX.T, 0, 255)
+    sepia = Image.fromarray(np.uint8(sepia_arr))
+    result = Image.blend(base, sepia, intensity)
+    if alpha is not None:
+        result = result.convert("RGBA")
+        result.putalpha(alpha)
+    return result
+
+
+# Each preset's "full strength" (intensity 1.0) recipe, expressed in the same
+# units as the sliders they reuse: multiplicative factors (1.0 = neutral) for
+# contrast/saturation/vibrance, additive amounts (0 = neutral) for warmth and
+# vignette, and a 0-1 blend amount for grayscale.
+FILTER_PRESETS = {
+    "vintage": {"contrast": 0.85, "saturation": 0.7, "warmth": 0.3, "vignette": 0.35},
+    "noir": {"grayscale": 1.0, "contrast": 1.3, "vignette": 0.4},
+    "vivid": {"saturation": 1.5, "vibrance": 1.3, "contrast": 1.15},
+    "cool": {"warmth": -0.35, "saturation": 1.05},
+    "warm": {"warmth": 0.35, "saturation": 1.05},
+    "fade": {"contrast": 0.75, "saturation": 0.85},
+}
+
+
+def apply_filter_preset(img: Image.Image, preset: str, intensity: float) -> Image.Image:
+    intensity = max(0.0, min(1.0, intensity))
+    if intensity <= 0:
+        return img
+    if preset == "sepia":
+        return apply_sepia(img, intensity)
+
+    recipe = FILTER_PRESETS.get(preset)
+    if not recipe:
+        return img
+
+    if "grayscale" in recipe:
+        img = apply_grayscale(img, "luminosity", recipe["grayscale"] * intensity)
+    if "saturation" in recipe:
+        img = ImageEnhance.Color(img).enhance(1.0 + (recipe["saturation"] - 1.0) * intensity)
+    if "vibrance" in recipe:
+        img = apply_vibrance(img, (recipe["vibrance"] - 1.0) * intensity)
+    if "warmth" in recipe:
+        img = apply_warmth(img, recipe["warmth"] * intensity)
+    if "contrast" in recipe:
+        img = ImageEnhance.Contrast(img).enhance(1.0 + (recipe["contrast"] - 1.0) * intensity)
+    if "vignette" in recipe:
+        img = apply_vignette(img, recipe["vignette"] * intensity)
+    return img
 
 
 def normalize_orientation(img: Image.Image) -> Image.Image:
@@ -612,6 +728,9 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     r = float(params.get("r", 1.0))
     g = float(params.get("g", 1.0))
     b = float(params.get("b", 1.0))
+    alpha = float(params.get("alpha", 1.0))
+    beta = float(params.get("beta", 0.0))
+    gamma = float(params.get("gamma", 1.0))
 
     if brightness != 1.0:
         img = ImageEnhance.Brightness(img).enhance(brightness)
@@ -619,6 +738,10 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         img = apply_exposure(img, exposure)
     if contrast != 1.0:
         img = ImageEnhance.Contrast(img).enhance(contrast)
+    if alpha != 1.0 or beta != 0.0:
+        img = apply_alpha_beta(img, alpha, beta)
+    if gamma != 1.0:
+        img = apply_gamma(img, gamma)
     img = apply_tone_region(img, whites - 1.0, WHITES_WEIGHTS)
     img = apply_tone_region(img, blacks - 1.0, BLACKS_WEIGHTS)
     img = apply_tone_region(img, shadows - 1.0, SHADOWS_WEIGHTS)
@@ -631,6 +754,14 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         img = ImageEnhance.Color(img).enhance(1 + (pop - 1) * 0.35)
     img = apply_channel_balance(img, r, g, b)
     img = apply_vignette(img, vignette)
+
+    grayscale_method = str(params.get("grayscale_method", "luminosity"))
+    grayscale_intensity = float(params.get("grayscale_intensity", 0.0))
+    img = apply_grayscale(img, grayscale_method, grayscale_intensity)
+
+    filter_preset = params.get("filter_preset")
+    if filter_preset and filter_preset != "none":
+        img = apply_filter_preset(img, filter_preset, float(params.get("filter_intensity", 1.0)))
 
     preview = params.get("preview")
     if preview and preview.get("w") and preview.get("h"):

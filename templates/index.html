@@ -77,6 +77,15 @@
           <label>Contrast <span data-out="contrast">1.00</span>
             <input type="range" id="contrast" min="0" max="2" step="0.01" value="1" disabled>
           </label>
+          <label>Alpha (gain) <span data-out="alpha">1.00</span>
+            <input type="range" id="alpha" min="0" max="3" step="0.01" value="1" disabled>
+          </label>
+          <label>Beta (bias) <span data-out="beta">0.00</span>
+            <input type="range" id="beta" min="-100" max="100" step="1" value="0" disabled>
+          </label>
+          <label>Gamma <span data-out="gamma">1.00</span>
+            <input type="range" id="gamma" min="0.1" max="3" step="0.01" value="1" disabled>
+          </label>
           <label>Whites <span data-out="whites">1.00</span>
             <input type="range" id="whites" min="0" max="2" step="0.01" value="1" disabled>
           </label>
@@ -235,6 +244,63 @@
             <input type="range" id="enhancementStrength" min="0" max="100" step="1" value="100" disabled>
           </label>
           <button id="applyEnhancementBtn" class="btn icon-btn secondary" title="Apply enhancement" aria-label="Apply enhancement" disabled>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg>
+            Grayscale
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label>Method
+            <select id="grayscaleMethod" disabled>
+              <option value="luminosity" selected>Luminosity</option>
+              <option value="average">Average</option>
+              <option value="red">Red channel</option>
+              <option value="green">Green channel</option>
+              <option value="blue">Blue channel</option>
+            </select>
+          </label>
+          <label>Intensity <span data-out="grayscaleIntensity">1.00</span>
+            <input type="range" id="grayscaleIntensity" min="0" max="1" step="0.01" value="1" disabled>
+          </label>
+          <button id="applyGrayscaleBtn" class="btn icon-btn secondary" title="Apply grayscale" aria-label="Apply grayscale" disabled>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            Filters
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label>Filter
+            <select id="filterPreset" disabled>
+              <option value="none" selected>None</option>
+              <option value="sepia">Sepia</option>
+              <option value="vintage">Vintage</option>
+              <option value="noir">Noir</option>
+              <option value="vivid">Vivid</option>
+              <option value="cool">Cool</option>
+              <option value="warm">Warm</option>
+              <option value="fade">Fade</option>
+            </select>
+          </label>
+          <label>Intensity <span data-out="filterIntensity">1.00</span>
+            <input type="range" id="filterIntensity" min="0" max="1" step="0.01" value="1" disabled>
+          </label>
+          <button id="applyFilterBtn" class="btn icon-btn secondary" title="Apply filter" aria-label="Apply filter" disabled>
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
         </div>

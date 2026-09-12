@@ -34,6 +34,12 @@ const enhancement = document.getElementById("enhancement");
 const enhancementStrength = document.getElementById("enhancementStrength");
 const enhancementStrengthField = document.getElementById("enhancementStrengthField");
 const enhancementStrengthOutput = document.getElementById("enhancementStrengthOutput");
+const grayscaleMethod = document.getElementById("grayscaleMethod");
+const grayscaleIntensity = document.getElementById("grayscaleIntensity");
+const applyGrayscaleBtn = document.getElementById("applyGrayscaleBtn");
+const filterPreset = document.getElementById("filterPreset");
+const filterIntensity = document.getElementById("filterIntensity");
+const applyFilterBtn = document.getElementById("applyFilterBtn");
 const statusEl = document.getElementById("status");
 const historyList = document.getElementById("historyList");
 const historyBackBtn = document.getElementById("historyBackBtn");
@@ -68,6 +74,9 @@ const SLIDER_LABELS = {
   brightness: "Brightness",
   exposure: "Exposure",
   contrast: "Contrast",
+  alpha: "Alpha (gain)",
+  beta: "Beta (bias)",
+  gamma: "Gamma",
   whites: "Whites",
   blacks: "Blacks",
   shadows: "Shadows",
@@ -81,10 +90,15 @@ const SLIDER_LABELS = {
   b: "Blue channel",
 };
 
+const ADDITIVE_SLIDERS = ["warmth", "vignette", "beta"];
+
 const sliders = [
   "brightness",
   "exposure",
   "contrast",
+  "alpha",
+  "beta",
+  "gamma",
   "whites",
   "blacks",
   "shadows",
@@ -132,11 +146,11 @@ imageWrap.hidden = false;
 dropHint.hidden = true;
 
 function neutralSliderValues() {
-  return Object.fromEntries(sliders.map((s) => [s.id, ["warmth", "vignette"].includes(s.id) ? 0 : 1]));
+  return Object.fromEntries(sliders.map((s) => [s.id, ADDITIVE_SLIDERS.includes(s.id) ? 0 : 1]));
 }
 
 function sliderAdjustment(id, raw, baseline) {
-  return ["warmth", "vignette"].includes(id) ? raw - baseline : raw / baseline;
+  return ADDITIVE_SLIDERS.includes(id) ? raw - baseline : raw / baseline;
 }
 
 function applySliderValues(values) {
@@ -657,6 +671,12 @@ fileInput.addEventListener("change", async () => {
   lockAspect.disabled = false;
   enhancement.disabled = false;
   enhancementStrength.disabled = false;
+  grayscaleMethod.disabled = false;
+  grayscaleIntensity.disabled = false;
+  applyGrayscaleBtn.disabled = false;
+  filterPreset.disabled = false;
+  filterIntensity.disabled = false;
+  applyFilterBtn.disabled = false;
   historyResetBtn.disabled = false;
   importHistoryBtn.disabled = false;
   exportHistoryBtn.disabled = false;
@@ -1181,3 +1201,47 @@ enhancementStrength.addEventListener("input", () => {
   enhancementStrengthOutput.textContent = `${enhancementStrength.value}%`;
 });
 updateEnhancementStrengthVisibility();
+
+grayscaleIntensity.addEventListener("input", () => {
+  document.querySelector('[data-out="grayscaleIntensity"]').textContent = parseFloat(grayscaleIntensity.value).toFixed(2);
+});
+
+applyGrayscaleBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  const method = grayscaleMethod.value;
+  const intensity = parseFloat(grayscaleIntensity.value);
+  if (intensity <= 0) return;
+  const methodLabel = grayscaleMethod.options[grayscaleMethod.selectedIndex].text;
+
+  commitStep(
+    { grayscale_method: method, grayscale_intensity: intensity },
+    `Grayscale (${methodLabel}, ${Math.round(intensity * 100)}%)`,
+    true
+  );
+
+  grayscaleMethod.value = "luminosity";
+  grayscaleIntensity.value = "1";
+  document.querySelector('[data-out="grayscaleIntensity"]').textContent = "1.00";
+});
+
+filterIntensity.addEventListener("input", () => {
+  document.querySelector('[data-out="filterIntensity"]').textContent = parseFloat(filterIntensity.value).toFixed(2);
+});
+
+applyFilterBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  const preset = filterPreset.value;
+  if (preset === "none") return;
+  const intensity = parseFloat(filterIntensity.value);
+  const label = filterPreset.options[filterPreset.selectedIndex].text;
+
+  commitStep(
+    { filter_preset: preset, filter_intensity: intensity },
+    `${label} filter ${Math.round(intensity * 100)}%`,
+    true
+  );
+
+  filterPreset.value = "none";
+  filterIntensity.value = "1";
+  document.querySelector('[data-out="filterIntensity"]').textContent = "1.00";
+});
