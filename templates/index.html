@@ -19,14 +19,10 @@
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
       <span class="btn-label">Reset</span>
     </button>
-    <button id="saveBtn" class="btn icon-btn primary" title="Save to project" aria-label="Save to project" disabled>
-      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>
-      <span class="btn-label">Save</span>
-    </button>
-    <a id="downloadBtn" class="btn icon-btn" href="#" hidden title="Download" aria-label="Download">
+    <button id="exportBtn" class="btn icon-btn primary" title="Export image" aria-label="Export image" disabled>
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-      <span class="btn-label">Download</span>
-    </a>
+      <span class="btn-label">Export</span>
+    </button>
     <button id="togglePanelBtn" class="btn icon-btn secondary" type="button" title="Hide adjustments panel" aria-label="Hide adjustments panel" aria-pressed="false">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="m11 9-3 3 3 3"/></svg>
       <span id="togglePanelLabel" class="btn-label">Hide panel</span>
@@ -315,6 +311,30 @@
     <div class="history-dialog-actions">
       <button type="button" data-history-mode="export" class="btn primary">Export settings</button>
       <button type="button" data-history-mode="cancel" class="btn secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="exportDialog" class="history-dialog" hidden>
+  <div class="history-dialog-card" role="dialog" aria-modal="true" aria-labelledby="exportDialogTitle">
+    <h2 id="exportDialogTitle">Export image</h2>
+    <label class="history-import-field">File name
+      <input type="text" id="exportFileName" value="edited-image">
+    </label>
+    <label class="history-import-field">Format
+      <select id="exportFormat">
+        <option value="png" selected>PNG</option>
+        <option value="jpeg">JPEG</option>
+        <option value="webp">WebP</option>
+        <option value="tiff">TIFF</option>
+        <option value="bmp">BMP</option>
+        <option value="gif">GIF</option>
+        <option value="ico">ICO</option>
+      </select>
+    </label>
+    <div class="history-dialog-actions">
+      <button type="button" data-export-mode="export" class="btn primary">Export</button>
+      <button type="button" data-export-mode="cancel" class="btn secondary">Cancel</button>
     </div>
   </div>
 </div>

@@ -1053,27 +1053,45 @@ def import_history(image_id):
     )
 
 
-@app.route("/save/<image_id>", methods=["POST"])
-def save(image_id):
-    old_original = original_path(image_id)
-    new_original = UPLOAD_DIR / f"{image_id}_original.png"
+EXPORT_FORMATS = {
+    "png": {"pillow_format": "PNG", "mimetype": "image/png", "ext": "png"},
+    "jpeg": {"pillow_format": "JPEG", "mimetype": "image/jpeg", "ext": "jpg"},
+    "webp": {"pillow_format": "WEBP", "mimetype": "image/webp", "ext": "webp"},
+    "tiff": {"pillow_format": "TIFF", "mimetype": "image/tiff", "ext": "tiff"},
+    "bmp": {"pillow_format": "BMP", "mimetype": "image/bmp", "ext": "bmp"},
+    "gif": {"pillow_format": "GIF", "mimetype": "image/gif", "ext": "gif"},
+    "ico": {"pillow_format": "ICO", "mimetype": "image/x-icon", "ext": "ico"},
+}
 
-    with current_source_image(image_id) as img:
-        img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
-        saved_name = f"{image_id}.png"
-        img.save(SAVED_DIR / saved_name, format="PNG")
-        img.save(new_original, format="PNG")
-        # new_original now holds exactly this image, so seed the cache for the
-        # post-save (empty-history) state instead of leaving it stale.
-        _SOURCE_CACHE[image_id] = ((), img.copy())
 
-    if old_original != new_original:
-        old_original.unlink(missing_ok=True)
+@app.route("/export/<image_id>", methods=["POST"])
+def export_image(image_id):
+    payload = request.get_json(force=True) or {}
+    fmt_key = str(payload.get("format", "png")).lower()
+    fmt = EXPORT_FORMATS.get(fmt_key)
+    if fmt is None:
+        return jsonify(error=f"Unsupported export format: {fmt_key}"), 400
 
-    HISTORY[image_id] = []
-    ACTIVE_HISTORY_COUNT[image_id] = 0
+    params = payload.get("params") or {}
+    try:
+        img = process_image_object(current_source_image(image_id), params)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
 
-    return jsonify(saved=True, filename=saved_name, download_url=f"/download/{saved_name}")
+    save_kwargs = {}
+    # JPEG/BMP have no alpha channel; GIF needs a palettized image.
+    if fmt_key in {"jpeg", "bmp"} and img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    elif fmt_key == "gif" and img.mode not in ("P", "L"):
+        img = img.convert("P", palette=Image.ADAPTIVE)
+    if fmt_key == "jpeg":
+        save_kwargs["quality"] = 95
+
+    buf = io.BytesIO()
+    img.save(buf, format=fmt["pillow_format"], **save_kwargs)
+    buf.seek(0)
+    filename = f"edited-image.{fmt['ext']}"
+    return send_file(buf, mimetype=fmt["mimetype"], as_attachment=True, download_name=filename)
 
 
 @app.route("/download/<filename>")

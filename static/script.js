@@ -1,7 +1,9 @@
 const fileInput = document.getElementById("fileInput");
 const resetBtn = document.getElementById("resetBtn");
-const saveBtn = document.getElementById("saveBtn");
-const downloadBtn = document.getElementById("downloadBtn");
+const exportBtn = document.getElementById("exportBtn");
+const exportDialog = document.getElementById("exportDialog");
+const exportFileName = document.getElementById("exportFileName");
+const exportFormat = document.getElementById("exportFormat");
 const togglePanelBtn = document.getElementById("togglePanelBtn");
 const togglePanelLabel = document.getElementById("togglePanelLabel");
 const layout = document.querySelector(".layout");
@@ -51,6 +53,16 @@ const enhanceProgress = document.getElementById("enhanceProgress");
 const enhanceProgressText = document.getElementById("enhanceProgressText");
 const enhanceProgressFill = document.getElementById("enhanceProgressFill");
 const enhanceCancelBtn = document.getElementById("enhanceCancelBtn");
+
+const EXPORT_EXTENSIONS = {
+  png: "png",
+  jpeg: "jpg",
+  webp: "webp",
+  tiff: "tiff",
+  bmp: "bmp",
+  gif: "gif",
+  ico: "ico",
+};
 
 const SLIDER_LABELS = {
   brightness: "Brightness",
@@ -347,7 +359,6 @@ function recordHistoryStructureChange() {
 }
 
 function renderHistory() {
-  downloadBtn.hidden = state.history.length === 0;
   historyList.innerHTML = "";
   const activeId = state.currentStepId || "original";
 
@@ -525,28 +536,24 @@ function requestPreview() {
   }, 150);
 }
 
-async function downloadCurrentImage() {
+async function exportCurrentImage(format, filename) {
   if (!state.imageId) return;
 
-  setStatus("Preparing download...");
+  setStatus("Preparing export...");
   const params = currentParams();
   delete params.preview;
-  const res = await fetch(`/process/${state.imageId}`, {
+  const res = await fetch(`/export/${state.imageId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
+    body: JSON.stringify({ params, format }),
   });
   if (!res.ok) {
-    setStatus("Download failed");
+    const data = await res.json().catch(() => ({}));
+    setStatus(data.error || "Export failed");
     return;
   }
 
-  const blobUrl = URL.createObjectURL(await res.blob());
-  const link = document.createElement("a");
-  link.href = blobUrl;
-  link.download = "edited-image.png";
-  link.click();
-  URL.revokeObjectURL(blobUrl);
+  downloadBlob(await res.blob(), filename);
   setStatus("");
 }
 
@@ -629,7 +636,7 @@ fileInput.addEventListener("change", async () => {
   fitPreviewToPane();
   requestPreview();
   resetBtn.disabled = false;
-  saveBtn.disabled = false;
+  exportBtn.disabled = false;
   applyCropBtn.disabled = false;
   clearCropBtn.disabled = false;
   applyResizeBtn.disabled = false;
@@ -723,33 +730,31 @@ window.addEventListener("resize", () => {
 });
 preview.addEventListener("dragstart", (e) => e.preventDefault());
 
-saveBtn.addEventListener("click", async () => {
-  if (!state.imageId) return;
-  const confirmed = window.confirm(
-    "Save to project? This finalizes all edits and clears the undo history."
-  );
-  if (!confirmed) return;
+function closeExportDialog() {
+  exportDialog.hidden = true;
+}
 
-  setStatus("Saving...");
-  const res = await fetch(`/save/${state.imageId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!res.ok) {
-    setStatus("Save failed");
-    return;
-  }
-  const data = await res.json();
-  downloadBtn.href = data.download_url;
-  state.history = [];
-  state.currentStepId = null;
-  renderHistory();
-  setStatus(`Saved as ${data.filename}`);
+exportBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  exportFileName.value = "edited-image";
+  exportFormat.value = "png";
+  exportDialog.hidden = false;
 });
 
-downloadBtn.addEventListener("click", (e) => {
-  e.preventDefault();
-  downloadCurrentImage();
+exportDialog.addEventListener("click", (event) => {
+  if (event.target === exportDialog) {
+    closeExportDialog();
+    return;
+  }
+  const mode = event.target.closest("[data-export-mode]")?.dataset.exportMode;
+  if (!mode) return;
+  const format = exportFormat.value;
+  const requestedName = exportFileName.value.trim() || "edited-image";
+  const ext = EXPORT_EXTENSIONS[format] || format;
+  const filename = requestedName.toLowerCase().endsWith(`.${ext}`) ? requestedName : `${requestedName}.${ext}`;
+  closeExportDialog();
+  if (mode !== "export") return;
+  exportCurrentImage(format, filename);
 });
 
 importHistoryBtn.addEventListener("click", () => {

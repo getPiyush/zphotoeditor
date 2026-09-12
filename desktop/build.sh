@@ -10,12 +10,28 @@ PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 VENV_DIR="$SCRIPT_DIR/.build-venv"
 
 PYTHON=""
-for candidate in python3 python; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        PYTHON="$candidate"
-        break
-    fi
-done
+
+# On Apple Silicon, prefer a native arm64 python.org install (framework
+# layout) over whatever's on PATH: Homebrew installed under /usr/local is
+# the Intel prefix and runs x86_64-only interpreters under Rosetta, and
+# PyTorch no longer ships macOS x86_64 wheels at all - torch install would
+# fail no matter which Python version that interpreter is.
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    for fw in /Library/Frameworks/Python.framework/Versions/*/bin/python3; do
+        if [ -x "$fw" ] && [ "$("$fw" -c 'import platform; print(platform.machine())' 2>/dev/null)" = "arm64" ]; then
+            PYTHON="$fw"
+        fi
+    done
+fi
+
+if [ -z "$PYTHON" ]; then
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+fi
 
 if [ -z "$PYTHON" ]; then
     echo "Python 3 was not found on this machine."
@@ -31,8 +47,39 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    PYTHON_ARCH="$("$PYTHON" -c 'import platform; print(platform.machine())' 2>/dev/null || echo unknown)"
+    if [ "$PYTHON_ARCH" != "arm64" ]; then
+        echo "$PYTHON runs as $PYTHON_ARCH under Rosetta, but this Mac is Apple Silicon (arm64)."
+        echo "PyTorch no longer publishes macOS x86_64 wheels, so torch will fail to install into it."
+        echo "Install a native arm64 Python from https://www.python.org/downloads/macos/ (or set up an"
+        echo "arm64 Homebrew under /opt/homebrew) and re-run this script."
+        exit 1
+    fi
+fi
+
 "$PYTHON" -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip
+"$VENV_DIR/bin/pip" install --quiet --upgrade pip setuptools wheel
+
+# basicsr==1.4.2 (a dependency of realesrgan, pinned in requirements.txt) is
+# unmaintained and fails to build on Python 3.13 with "KeyError:
+# '__version__'" - see patch_basicsr_setup.py for why. Fetch its sdist,
+# patch the bug out, and install it up front so the main install below finds
+# it already satisfied instead of trying to build the broken version.
+BASICSR_VERSION="$(grep -oE '^basicsr==[A-Za-z0-9.]+' "$PARENT_DIR/requirements.txt" | cut -d= -f3)"
+if [ -n "$BASICSR_VERSION" ] && ! "$VENV_DIR/bin/pip" show basicsr 2>/dev/null | grep -qx "Version: $BASICSR_VERSION"; then
+    echo "Fetching and patching basicsr $BASICSR_VERSION for Python 3.13 compatibility..."
+    BASICSR_TMP_DIR="$(mktemp -d)"
+    BASICSR_SDIST_URL="$(curl -sL "https://pypi.org/pypi/basicsr/$BASICSR_VERSION/json" \
+        | "$VENV_DIR/bin/python" -c "import json, sys; d = json.load(sys.stdin); print(next(u['url'] for u in d['urls'] if u['packagetype'] == 'sdist'))")"
+    curl -sL "$BASICSR_SDIST_URL" -o "$BASICSR_TMP_DIR/basicsr.tar.gz"
+    tar xzf "$BASICSR_TMP_DIR/basicsr.tar.gz" -C "$BASICSR_TMP_DIR"
+    BASICSR_SRC_DIR="$(find "$BASICSR_TMP_DIR" -maxdepth 1 -type d -name 'basicsr-*')"
+    "$VENV_DIR/bin/python" "$SCRIPT_DIR/patch_basicsr_setup.py" "$BASICSR_SRC_DIR/setup.py"
+    "$VENV_DIR/bin/pip" install --quiet --no-build-isolation --no-deps "$BASICSR_SRC_DIR"
+    rm -rf "$BASICSR_TMP_DIR"
+fi
+
 "$VENV_DIR/bin/pip" install --quiet -r "$PARENT_DIR/requirements.txt" -r "$SCRIPT_DIR/requirements.txt"
 "$VENV_DIR/bin/python" "$SCRIPT_DIR/build.py"
 
