@@ -295,6 +295,39 @@ def apply_grayscale(img: Image.Image, method: str, intensity: float) -> Image.Im
     return result
 
 
+def apply_color_isolation(
+    img: Image.Image, hue_min: float, hue_max: float, min_saturation: float, tone: float
+) -> Image.Image:
+    """Keep pixels whose hue falls within [hue_min, hue_max] degrees (and whose
+    saturation is at least `min_saturation`) in their original color; replace
+    every other pixel with a flat black/gray/white fill. Low-saturation pixels
+    have an unreliable/near-meaningless hue, so `min_saturation` (0-1) lets
+    near-gray pixels be excluded even if their noisy hue lands in range.
+    `tone` (0=black - 1=white) sets the fill for excluded pixels."""
+    hue_min = max(0.0, min(360.0, hue_min))
+    hue_max = max(0.0, min(360.0, hue_max))
+    if hue_min > hue_max:
+        hue_min, hue_max = hue_max, hue_min
+    min_saturation = max(0.0, min(1.0, min_saturation))
+    tone = max(0.0, min(1.0, tone))
+
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = img.convert("RGB") if img.mode != "RGB" else img
+    h_channel, s_channel, _ = base.convert("HSV").split()
+    hue_deg = np.array(h_channel, dtype=np.float32) * (360.0 / 255.0)
+    saturation = np.array(s_channel, dtype=np.float32) / 255.0
+    mask = (hue_deg >= hue_min) & (hue_deg <= hue_max) & (saturation >= min_saturation)
+
+    arr = np.array(base, dtype=np.float32)
+    fill = np.full_like(arr, tone * 255.0)
+    result_arr = np.where(mask[..., None], arr, fill)
+    result = Image.fromarray(np.uint8(np.clip(result_arr, 0, 255)))
+    if alpha is not None:
+        result = result.convert("RGBA")
+        result.putalpha(alpha)
+    return result
+
+
 def apply_vibrance(img: Image.Image, amount: float) -> Image.Image:
     if amount == 0:
         return img
@@ -684,6 +717,18 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     img = normalize_orientation(img)
     img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
 
+    # Live-preview-only viewport crop (distinct from `crop`, which permanently
+    # crops the source on commit): restricts adjustment/filter processing to
+    # whatever's currently visible on screen so dragging a slider stays fast
+    # regardless of the source image's actual resolution.
+    preview_crop = params.get("preview_crop")
+    if preview_crop and preview_crop.get("w") and preview_crop.get("h"):
+        x = max(0, min(int(preview_crop["x"]), img.width - 1))
+        y = max(0, min(int(preview_crop["y"]), img.height - 1))
+        w = max(1, min(int(preview_crop["w"]), img.width - x))
+        h = max(1, min(int(preview_crop["h"]), img.height - y))
+        img = img.crop((x, y, x + w, y + h))
+
     rotation = int(float(params.get("rotation", 0) or 0)) % 360
     if rotation:
         img = img.rotate(-rotation, expand=True)
@@ -762,6 +807,13 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     filter_preset = params.get("filter_preset")
     if filter_preset and filter_preset != "none":
         img = apply_filter_preset(img, filter_preset, float(params.get("filter_intensity", 1.0)))
+
+    isolation_hue_min = float(params.get("isolation_hue_min", 0.0))
+    isolation_hue_max = float(params.get("isolation_hue_max", 360.0))
+    if isolation_hue_min > 0.0 or isolation_hue_max < 360.0:
+        isolation_min_saturation = float(params.get("isolation_min_saturation", 0.0))
+        isolation_tone = float(params.get("isolation_tone", 0.0))
+        img = apply_color_isolation(img, isolation_hue_min, isolation_hue_max, isolation_min_saturation, isolation_tone)
 
     preview = params.get("preview")
     if preview and preview.get("w") and preview.get("h"):
@@ -891,6 +943,7 @@ def commit(image_id):
     params = request.get_json(force=True) or {}
     label = params.pop("label", "Edit")
     params.pop("preview", None)  # never bake the preview downscale into a step
+    params.pop("preview_crop", None)  # never bake the live-preview viewport crop into a step
 
     try:
         img = process_image_object(current_source_image(image_id), params)

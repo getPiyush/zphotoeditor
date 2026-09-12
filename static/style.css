@@ -173,6 +173,16 @@ body {
   margin: 0;
 }
 
+#previewCropOverlay {
+  position: absolute;
+  border-radius: 4px;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+#previewCropOverlay[hidden] { display: none; }
+
 .initial-preview-text {
   position: absolute;
   top: 50%;
@@ -338,6 +348,22 @@ body {
   overflow: hidden;
 }
 
+/* A panel with an unapplied (pending) change is lightened 4 steps above the
+   default rgba(255,255,255,0.02) background, in the same 0.02-per-step
+   increments used for that default, so it stands out from its neighbors. */
+.accordion-item.has-pending {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.pending-indicator {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.pending-indicator[hidden] { display: none; }
+
 .accordion-header {
   width: 100%;
   display: flex;
@@ -399,11 +425,110 @@ label.checkbox input { width: auto; margin-right: 6px; }
 
 .hint { font-size: 12px; color: var(--muted); margin-top: 0; }
 
+.hue-range-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.hue-range-label span { float: none; }
+.hue-range-values { color: var(--muted); }
+
+.hue-range {
+  position: relative;
+  height: 24px;
+  margin: 4px 0 12px;
+}
+
+.hue-range-track {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 8px;
+  transform: translateY(-50%);
+  border-radius: 4px;
+  background: linear-gradient(
+    to right,
+    hsl(0, 100%, 50%),
+    hsl(60, 100%, 50%),
+    hsl(120, 100%, 50%),
+    hsl(180, 100%, 50%),
+    hsl(240, 100%, 50%),
+    hsl(300, 100%, 50%),
+    hsl(360, 100%, 50%)
+  );
+  pointer-events: none;
+}
+
+.hue-range-selected {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  transform: translateY(-50%);
+  border-radius: 4px;
+  border: 2px solid #fff;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.hue-range-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: none;
+}
+
+.hue-range-input::-webkit-slider-runnable-track { background: transparent; }
+.hue-range-input::-moz-range-track { background: transparent; }
+
+.hue-range-input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: pointer;
+  margin-top: 5px;
+}
+
+.hue-range-input::-moz-range-thumb {
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: pointer;
+}
+
 fieldset .btn { width: 100%; margin-top: 6px; }
 
 .zoom-controls {
   display: flex;
   gap: 8px;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.panel-action-btn {
+  gap: 6px;
+  padding: 8px 14px;
+  line-height: normal;
 }
 
 .zoom-controls .btn,
