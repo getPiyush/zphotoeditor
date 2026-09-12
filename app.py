@@ -3,6 +3,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import threading
 import time
 import urllib.request
@@ -22,14 +23,35 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 Image.MAX_IMAGE_PIXELS = None
 
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-SAVED_DIR = BASE_DIR / "saved"
-STEPS_DIR = BASE_DIR / "steps"
+
+
+def _user_data_dir() -> Path:
+    """Where user data (uploads, saved images, edit history, downloaded
+    model weights) lives. A normal checkout keeps this next to app.py like
+    before. A single-file frozen executable (PyInstaller --onefile)
+    extracts BASE_DIR fresh into a temp folder on every launch and wipes
+    it on exit, so user data there would vanish between runs -- it needs
+    an OS-appropriate persistent location instead."""
+    if not getattr(sys, "frozen", False):
+        return BASE_DIR
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    elif sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", Path.home()))
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return root / "ZPhotoEditor"
+
+
+DATA_DIR = _user_data_dir()
+UPLOAD_DIR = DATA_DIR / "uploads"
+SAVED_DIR = DATA_DIR / "saved"
+STEPS_DIR = DATA_DIR / "steps"
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp"}
 
-UPLOAD_DIR.mkdir(exist_ok=True)
-SAVED_DIR.mkdir(exist_ok=True)
-STEPS_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+SAVED_DIR.mkdir(parents=True, exist_ok=True)
+STEPS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 # High-resolution photos (e.g. 8000px+ PNG/TIFF exports) can comfortably exceed
@@ -290,15 +312,22 @@ def get_realesrgan_upsampler():
             raise RuntimeError(f"Real-ESRGAN dependency import failed: {exc}") from exc
 
         model_path = Path(
-            os.environ.get("REALESRGAN_MODEL_PATH", BASE_DIR / "models" / "RealESRGAN_x4plus.pth")
+            os.environ.get("REALESRGAN_MODEL_PATH", DATA_DIR / "models" / "RealESRGAN_x4plus.pth")
         )
         if not model_path.exists():
             model_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                urllib.request.urlretrieve(REALESRGAN_MODEL_URL, model_path)
-            except OSError as exc:
-                model_path.unlink(missing_ok=True)
-                raise RuntimeError(f"Could not download Real-ESRGAN weights: {exc}") from exc
+            # A frozen build bundles the weights alongside the rest of the
+            # app (see desktop/build.py); seed the persistent copy from
+            # there once instead of hitting the network on every install.
+            bundled_path = BASE_DIR / "models" / "RealESRGAN_x4plus.pth"
+            if getattr(sys, "frozen", False) and bundled_path.exists():
+                shutil.copyfile(bundled_path, model_path)
+            else:
+                try:
+                    urllib.request.urlretrieve(REALESRGAN_MODEL_URL, model_path)
+                except OSError as exc:
+                    model_path.unlink(missing_ok=True)
+                    raise RuntimeError(f"Could not download Real-ESRGAN weights: {exc}") from exc
 
         model = RRDBNet(
             num_in_ch=3,

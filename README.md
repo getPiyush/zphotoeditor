@@ -4,7 +4,43 @@ A small Flask web app for basic photo editing: upload an image, adjust
 brightness/exposure/contrast and color balance, crop and resize, then save
 the result into the project folder or download it.
 
-## Setup
+## Run as a Desktop App (No Setup Required)
+
+If someone has already built the desktop app for you, you don't need Python,
+a terminal, or any of the developer setup below — just the app file for your
+operating system:
+
+- **macOS**: `ZPhotoEditor`
+- **Windows**: `ZPhotoEditor.exe`
+- **Linux**: `ZPhotoEditor`
+
+1. Double-click it (macOS/Windows) to open zPhotoEditor in its own window,
+   just like any other app. On Linux, you may need to allow it to run first
+   (right-click → Properties → Permissions → "Allow executing", or
+   `chmod +x ZPhotoEditor` in a terminal), then double-click it or run
+   `./ZPhotoEditor`.
+2. The first time you open it:
+   - **macOS**: Gatekeeper blocks apps from unidentified developers. Right-click
+     (or Control-click) the file, choose **Open**, then confirm **Open** in the
+     dialog that appears. You only need to do this once.
+   - **Windows**: SmartScreen may show "Windows protected your PC." Click
+     **More info**, then **Run anyway**.
+3. Use the app exactly as described in [Usage](#usage) below — upload a photo,
+   adjust it, then click **Save to project** or **Download** when you're happy
+   with it.
+4. Your edited photos are saved to a folder on your computer, not hidden
+   inside the app itself:
+   - **macOS**: `~/Library/Application Support/ZPhotoEditor/saved`
+   - **Windows**: `%APPDATA%\ZPhotoEditor\saved`
+   - **Linux**: `~/.local/share/ZPhotoEditor/saved`
+5. To close the app, just close its window like any other program — there's
+   no server to stop and no terminal to keep open.
+
+Don't have a built app yet? Anyone with the project's source code can create
+one for your operating system by running `desktop/build.sh` (macOS/Linux) or
+`desktop/build.cmd` (Windows) from the project folder.
+
+## Setup (For Developers)
 
 ```bash
 cd photo-editor
