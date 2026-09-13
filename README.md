@@ -1,4 +1,4 @@
-# Z
+# ZPhoto Editor
 Z(rugal) Photo Editor
 
 A small Flask web app for basic photo editing: upload an image, adjust
