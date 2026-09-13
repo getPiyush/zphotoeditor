@@ -1,4 +1,5 @@
-# Photo Editor
+# Z
+Z(rugal) Photo Editor
 
 A small Flask web app for basic photo editing: upload an image, adjust
 brightness/exposure/contrast and color balance, crop and resize, then save
