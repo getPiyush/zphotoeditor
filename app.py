@@ -1247,6 +1247,70 @@ EXPORT_FORMATS = {
     "ico": {"pillow_format": "ICO", "mimetype": "image/x-icon", "ext": "ico"},
 }
 
+# TIFF codecs that Pillow can write for any image mode (CCITT/Group3/Group4
+# are bilevel-only, so they're left out here).
+TIFF_COMPRESSIONS = {"none", "tiff_lzw", "tiff_adobe_deflate", "packbits", "jpeg", "lzma"}
+JPEG_SUBSAMPLING = {"4:4:4": 0, "4:2:2": 1, "4:2:0": 2, "keep": "keep"}
+ICO_DEFAULT_SIZES = [16, 24, 32, 48, 64, 128, 256]
+
+
+def _clamp_num(value, lo, hi, default):
+    try:
+        return max(lo, min(hi, type(default)(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _prepare_export(img: Image.Image, fmt_key: str, options: dict) -> tuple[Image.Image, dict]:
+    """Applies the format-specific compression/quality options to `img`,
+    returning the (possibly mode-converted) image and the Pillow save kwargs."""
+    save_kwargs = {}
+    if fmt_key == "png":
+        save_kwargs["optimize"] = bool(options.get("optimize", False))
+        save_kwargs["compress_level"] = _clamp_num(options.get("compress_level", 6), 0, 9, 6)
+    elif fmt_key == "jpeg":
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        save_kwargs["quality"] = _clamp_num(options.get("quality", 95), 1, 100, 95)
+        save_kwargs["optimize"] = bool(options.get("optimize", False))
+        save_kwargs["progressive"] = bool(options.get("progressive", False))
+        # "keep" only works when the source image's own format is JPEG, which
+        # is never true here since `img` comes from the processing pipeline —
+        # so "Auto" just omits the kwarg and lets Pillow pick its own default.
+        subsampling = JPEG_SUBSAMPLING.get(options.get("subsampling"), None)
+        if subsampling is not None and subsampling != "keep":
+            save_kwargs["subsampling"] = subsampling
+    elif fmt_key == "webp":
+        save_kwargs["lossless"] = bool(options.get("lossless", False))
+        save_kwargs["quality"] = _clamp_num(options.get("quality", 90), 0, 100, 90)
+        save_kwargs["method"] = _clamp_num(options.get("method", 4), 0, 6, 4)
+    elif fmt_key == "tiff":
+        compression = options.get("compression", "tiff_adobe_deflate")
+        if compression not in TIFF_COMPRESSIONS:
+            compression = "tiff_adobe_deflate"
+        if compression == "jpeg" and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        if compression != "none":
+            save_kwargs["compression"] = compression
+        if compression == "jpeg":
+            save_kwargs["quality"] = _clamp_num(options.get("quality", 90), 1, 100, 90)
+    elif fmt_key == "bmp":
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+    elif fmt_key == "gif":
+        colors = _clamp_num(options.get("colors", 256), 2, 256, 256)
+        rgb = img.convert("RGB") if img.mode != "RGB" else img
+        img = rgb.quantize(colors=colors, method=Image.MEDIANCUT)
+        save_kwargs["optimize"] = bool(options.get("optimize", True))
+    elif fmt_key == "ico":
+        requested = options.get("sizes") or ICO_DEFAULT_SIZES
+        max_dim = max(img.size)
+        sizes = sorted({_clamp_num(s, 1, max_dim, 0) for s in requested if _clamp_num(s, 1, max_dim, 0)})
+        if not sizes:
+            sizes = [min(256, max_dim)]
+        save_kwargs["sizes"] = [(s, s) for s in sizes]
+    return img, save_kwargs
+
 
 @app.route("/export/<image_id>", methods=["POST"])
 def export_image(image_id):
@@ -1257,19 +1321,13 @@ def export_image(image_id):
         return jsonify(error=f"Unsupported export format: {fmt_key}"), 400
 
     params = payload.get("params") or {}
+    options = payload.get("options") or {}
     try:
         img = process_image_object(current_source_image(image_id), params)
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
 
-    save_kwargs = {}
-    # JPEG/BMP have no alpha channel; GIF needs a palettized image.
-    if fmt_key in {"jpeg", "bmp"} and img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
-    elif fmt_key == "gif" and img.mode not in ("P", "L"):
-        img = img.convert("P", palette=Image.ADAPTIVE)
-    if fmt_key == "jpeg":
-        save_kwargs["quality"] = 95
+    img, save_kwargs = _prepare_export(img, fmt_key, options)
 
     buf = io.BytesIO()
     img.save(buf, format=fmt["pillow_format"], **save_kwargs)

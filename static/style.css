@@ -28,11 +28,24 @@ body {
   flex: 0 0 auto;
 }
 
-.topbar h1 { font-size: 12px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.topbar h1 { font-size: 12px; margin: 0; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
 .brand-logo { height: 18px; width: auto; display: block; }
 
-.topbar-actions { display: flex; gap: 6.4px; align-items: center; }
+.pending-changes-banner {
+  flex: 1 1 auto;
+  margin: 0 16px;
+  padding: 4px 10px;
+  font-size: 11.2px;
+  color: #f2c14e;
+  background: rgba(242, 193, 78, 0.12);
+  border: 1px solid rgba(242, 193, 78, 0.35);
+  border-radius: 4.8px;
+}
+
+.pending-changes-banner[hidden] { display: none; }
+
+.topbar-actions { display: flex; gap: 6.4px; align-items: center; margin-left: auto; flex: 0 0 auto; }
 
 /* Top toolbar controls at 80% of the base .btn/.icon-btn/.icon sizing. */
 .topbar-actions .btn {
@@ -651,6 +664,26 @@ fieldset .btn { width: 100%; margin-top: 6px; }
   background: #333644;
   color: var(--text);
 }
+
+.export-format-options {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.export-format-options[hidden] { display: none; }
+
+.export-format-options .history-import-field:last-child { margin-bottom: 0; }
+
+.ico-size-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px 12px;
+}
+
+.ico-size-options label.checkbox { margin-top: 4px; }
 
 .history-dialog-actions {
   display: grid;

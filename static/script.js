@@ -4,8 +4,25 @@ const exportBtn = document.getElementById("exportBtn");
 const exportDialog = document.getElementById("exportDialog");
 const exportFileName = document.getElementById("exportFileName");
 const exportFormat = document.getElementById("exportFormat");
+const exportFormatOptionGroups = document.querySelectorAll("[data-export-options]");
+const exportPngCompressLevel = document.getElementById("exportPngCompressLevel");
+const exportPngOptimize = document.getElementById("exportPngOptimize");
+const exportJpegQuality = document.getElementById("exportJpegQuality");
+const exportJpegSubsampling = document.getElementById("exportJpegSubsampling");
+const exportJpegProgressive = document.getElementById("exportJpegProgressive");
+const exportJpegOptimize = document.getElementById("exportJpegOptimize");
+const exportWebpLossless = document.getElementById("exportWebpLossless");
+const exportWebpQuality = document.getElementById("exportWebpQuality");
+const exportWebpMethod = document.getElementById("exportWebpMethod");
+const exportTiffCompression = document.getElementById("exportTiffCompression");
+const exportTiffQuality = document.getElementById("exportTiffQuality");
+const exportTiffQualityField = document.getElementById("exportTiffQualityField");
+const exportGifColors = document.getElementById("exportGifColors");
+const exportGifOptimize = document.getElementById("exportGifOptimize");
+const exportIcoSizeChecks = document.querySelectorAll(".exportIcoSize");
 const togglePanelBtn = document.getElementById("togglePanelBtn");
 const togglePanelLabel = document.getElementById("togglePanelLabel");
+const pendingChangesBanner = document.getElementById("pendingChangesBanner");
 const layout = document.querySelector(".layout");
 const dropHint = document.getElementById("dropHint");
 const imageWrap = document.getElementById("imageWrap");
@@ -413,6 +430,18 @@ function updatePanelButtons() {
 
   const isolationPending = Boolean(state.imageId) && isIsolationPending();
   setPanelPendingUI(applyIsolationBtn, resetIsolationBtn, isolationPanelItem, isolationPendingIndicator, isolationPending);
+
+  const pendingPanelNames = [
+    lightPending && "Light",
+    colorPending && "Color",
+    grayscalePending && "Grayscale",
+    filtersPending && "Filters",
+    isolationPending && "Color Isolation",
+  ].filter(Boolean);
+  pendingChangesBanner.hidden = pendingPanelNames.length === 0;
+  pendingChangesBanner.textContent = pendingPanelNames.length
+    ? `Pending changes in ${pendingPanelNames.join(", ")} (exported image will not have these pending changes applied)`
+    : "";
 }
 
 function resetGrayscaleControls() {
@@ -842,16 +871,70 @@ function requestPreview() {
   }, 150);
 }
 
+// Shows only the compression/quality controls relevant to the format
+// currently selected in the export dialog.
+function updateExportOptionsVisibility() {
+  const format = exportFormat.value;
+  exportFormatOptionGroups.forEach((group) => {
+    group.hidden = group.dataset.exportOptions !== format;
+  });
+  exportTiffQualityField.hidden = exportTiffCompression.value !== "jpeg";
+}
+
+// Reads the compression/quality controls for the currently selected export
+// format into the options payload sent to the backend.
+function collectExportOptions(format) {
+  switch (format) {
+    case "png":
+      return {
+        compress_level: parseInt(exportPngCompressLevel.value, 10),
+        optimize: exportPngOptimize.checked,
+      };
+    case "jpeg":
+      return {
+        quality: parseInt(exportJpegQuality.value, 10),
+        subsampling: exportJpegSubsampling.value,
+        progressive: exportJpegProgressive.checked,
+        optimize: exportJpegOptimize.checked,
+      };
+    case "webp":
+      return {
+        lossless: exportWebpLossless.checked,
+        quality: parseInt(exportWebpQuality.value, 10),
+        method: parseInt(exportWebpMethod.value, 10),
+      };
+    case "tiff":
+      return {
+        compression: exportTiffCompression.value,
+        quality: parseInt(exportTiffQuality.value, 10),
+      };
+    case "gif":
+      return {
+        colors: parseInt(exportGifColors.value, 10),
+        optimize: exportGifOptimize.checked,
+      };
+    case "ico":
+      return {
+        sizes: Array.from(exportIcoSizeChecks)
+          .filter((el) => el.checked)
+          .map((el) => parseInt(el.value, 10)),
+      };
+    default:
+      return {};
+  }
+}
+
 async function exportCurrentImage(format, filename) {
   if (!state.imageId) return;
 
   setStatus("Preparing export...");
   const params = currentParams();
   delete params.preview;
+  const options = collectExportOptions(format);
   const res = await fetch(`/export/${state.imageId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ params, format }),
+    body: JSON.stringify({ params, format, options }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -1060,7 +1143,18 @@ exportBtn.addEventListener("click", () => {
   if (!state.imageId) return;
   exportFileName.value = "edited-image";
   exportFormat.value = "png";
+  updateExportOptionsVisibility();
   exportDialog.hidden = false;
+});
+
+exportFormat.addEventListener("change", updateExportOptionsVisibility);
+exportTiffCompression.addEventListener("change", updateExportOptionsVisibility);
+
+// Keeps each export option range input's numeric readout in sync as it's dragged.
+["exportPngCompressLevel", "exportJpegQuality", "exportWebpQuality", "exportWebpMethod", "exportTiffQuality", "exportGifColors"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", (e) => {
+    document.querySelector(`[data-out="${id}"]`).textContent = e.target.value;
+  });
 });
 
 exportDialog.addEventListener("click", (event) => {

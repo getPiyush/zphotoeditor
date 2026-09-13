@@ -9,6 +9,7 @@
 <body>
 <header class="topbar">
   <h1><img src="{{ url_for('static', filename='zjournal_logo.png') }}" alt="Zrugal" class="brand-logo"> Photo Editor</h1>
+  <p id="pendingChangesBanner" class="pending-changes-banner" role="status" hidden></p>
   <div class="topbar-actions">
     <label class="btn icon-btn secondary" for="fileInput" title="Upload photo" aria-label="Upload photo">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 8 12 3 17 8"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
@@ -477,6 +478,80 @@
         <option value="ico">ICO</option>
       </select>
     </label>
+
+    <div id="exportOptionsPng" class="export-format-options" data-export-options="png">
+      <label class="history-import-field">Compression level (0=fastest, 9=smallest) <span data-out="exportPngCompressLevel">6</span>
+        <input type="range" id="exportPngCompressLevel" min="0" max="9" step="1" value="6">
+      </label>
+      <label class="checkbox"><input type="checkbox" id="exportPngOptimize"> Optimize (slower, smaller file)</label>
+    </div>
+
+    <div id="exportOptionsJpeg" class="export-format-options" data-export-options="jpeg" hidden>
+      <label class="history-import-field">Quality <span data-out="exportJpegQuality">95</span>
+        <input type="range" id="exportJpegQuality" min="1" max="100" step="1" value="95">
+      </label>
+      <label class="history-import-field">Chroma subsampling
+        <select id="exportJpegSubsampling">
+          <option value="keep" selected>Auto</option>
+          <option value="4:4:4">4:4:4 (best quality)</option>
+          <option value="4:2:2">4:2:2</option>
+          <option value="4:2:0">4:2:0 (smallest file)</option>
+        </select>
+      </label>
+      <label class="checkbox"><input type="checkbox" id="exportJpegProgressive"> Progressive</label>
+      <label class="checkbox"><input type="checkbox" id="exportJpegOptimize"> Optimize (slower, smaller file)</label>
+    </div>
+
+    <div id="exportOptionsWebp" class="export-format-options" data-export-options="webp" hidden>
+      <label class="checkbox"><input type="checkbox" id="exportWebpLossless"> Lossless</label>
+      <label class="history-import-field">Quality <span data-out="exportWebpQuality">90</span>
+        <input type="range" id="exportWebpQuality" min="0" max="100" step="1" value="90">
+      </label>
+      <label class="history-import-field">Compression method (0=fastest, 6=smallest) <span data-out="exportWebpMethod">4</span>
+        <input type="range" id="exportWebpMethod" min="0" max="6" step="1" value="4">
+      </label>
+    </div>
+
+    <div id="exportOptionsTiff" class="export-format-options" data-export-options="tiff" hidden>
+      <label class="history-import-field">Compression
+        <select id="exportTiffCompression">
+          <option value="tiff_adobe_deflate" selected>ZIP (Deflate)</option>
+          <option value="tiff_lzw">LZW</option>
+          <option value="packbits">PackBits</option>
+          <option value="lzma">LZMA</option>
+          <option value="jpeg">JPEG (lossy)</option>
+          <option value="none">None (uncompressed)</option>
+        </select>
+      </label>
+      <label class="history-import-field" id="exportTiffQualityField" hidden>JPEG quality <span data-out="exportTiffQuality">90</span>
+        <input type="range" id="exportTiffQuality" min="1" max="100" step="1" value="90">
+      </label>
+    </div>
+
+    <div id="exportOptionsGif" class="export-format-options" data-export-options="gif" hidden>
+      <label class="history-import-field">Palette colors <span data-out="exportGifColors">256</span>
+        <input type="range" id="exportGifColors" min="2" max="256" step="1" value="256">
+      </label>
+      <label class="checkbox"><input type="checkbox" id="exportGifOptimize" checked> Optimize palette/frames</label>
+    </div>
+
+    <div id="exportOptionsBmp" class="export-format-options" data-export-options="bmp" hidden>
+      <p class="hint">BMP is stored uncompressed; there are no compression settings for this format.</p>
+    </div>
+
+    <div id="exportOptionsIco" class="export-format-options" data-export-options="ico" hidden>
+      <label class="history-import-field">Icon sizes to embed</label>
+      <div class="ico-size-options">
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="16" checked> 16&times;16</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="24"> 24&times;24</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="32" checked> 32&times;32</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="48" checked> 48&times;48</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="64"> 64&times;64</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="128"> 128&times;128</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="256" checked> 256&times;256</label>
+      </div>
+    </div>
+
     <div class="history-dialog-actions">
       <button type="button" data-export-mode="export" class="btn primary">Export</button>
       <button type="button" data-export-mode="cancel" class="btn secondary">Cancel</button>
