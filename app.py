@@ -411,6 +411,48 @@ def apply_filter_preset(img: Image.Image, preset: str, intensity: float) -> Imag
     return img
 
 
+def apply_pop(img: Image.Image, amount: float) -> Image.Image:
+    """Single "make it pop" control: a contrast boost plus a smaller, correlated
+    saturation boost (0.35x as strong) so contrast doesn't wash colors out."""
+    if amount == 1.0:
+        return img
+    img = ImageEnhance.Contrast(img).enhance(amount)
+    return ImageEnhance.Color(img).enhance(1 + (amount - 1) * 0.35)
+
+
+# Each entry maps one or more request params to the neutral ("no-op") value
+# for each, and the function that applies them once any of them differs from
+# neutral. Declaring the pipeline as data instead of a long sequence of
+# "extract float -> if changed: apply" statements keeps the order of
+# adjustments and the full set of tunable params visible in one place, and
+# means adding a new adjustment is a one-line table entry rather than an edit
+# to a long function.
+TONE_PIPELINE = [
+    (("brightness",), (1.0,), lambda img, v: ImageEnhance.Brightness(img).enhance(v)),
+    (("exposure",), (1.0,), apply_exposure),
+    (("contrast",), (1.0,), lambda img, v: ImageEnhance.Contrast(img).enhance(v)),
+    (("alpha", "beta"), (1.0, 0.0), apply_alpha_beta),
+    (("gamma",), (1.0,), apply_gamma),
+    (("whites",), (1.0,), lambda img, v: apply_tone_region(img, v - 1.0, WHITES_WEIGHTS)),
+    (("blacks",), (1.0,), lambda img, v: apply_tone_region(img, v - 1.0, BLACKS_WEIGHTS)),
+    (("shadows",), (1.0,), lambda img, v: apply_tone_region(img, v - 1.0, SHADOWS_WEIGHTS)),
+    (("saturation",), (1.0,), lambda img, v: ImageEnhance.Color(img).enhance(v)),
+    (("vibrance",), (1.0,), lambda img, v: apply_vibrance(img, v - 1.0)),
+    (("warmth",), (0.0,), apply_warmth),
+    (("pop",), (1.0,), apply_pop),
+    (("r", "g", "b"), (1.0, 1.0, 1.0), apply_channel_balance),
+    (("vignette",), (0.0,), apply_vignette),
+]
+
+
+def _run_tone_pipeline(img: Image.Image, params: dict) -> Image.Image:
+    for names, neutrals, fn in TONE_PIPELINE:
+        values = tuple(float(params.get(name, neutral)) for name, neutral in zip(names, neutrals))
+        if values != neutrals:
+            img = fn(img, *values)
+    return img
+
+
 def normalize_orientation(img: Image.Image) -> Image.Image:
     corrected = ImageOps.exif_transpose(img)
     exif = corrected.getexif()
@@ -759,46 +801,7 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
             img = resize_image(img, (int(resize["w"]), int(resize["h"])))
         img = apply_enhancement(img, enhancement_algorithm, enhancement_strength)
 
-    brightness = float(params.get("brightness", 1.0))
-    contrast = float(params.get("contrast", 1.0))
-    exposure = float(params.get("exposure", 1.0))
-    whites = float(params.get("whites", 1.0))
-    blacks = float(params.get("blacks", 1.0))
-    shadows = float(params.get("shadows", 1.0))
-    saturation = float(params.get("saturation", 1.0))
-    vibrance = float(params.get("vibrance", 1.0))
-    warmth = float(params.get("warmth", 0.0))
-    pop = float(params.get("pop", 1.0))
-    vignette = float(params.get("vignette", 0.0))
-    r = float(params.get("r", 1.0))
-    g = float(params.get("g", 1.0))
-    b = float(params.get("b", 1.0))
-    alpha = float(params.get("alpha", 1.0))
-    beta = float(params.get("beta", 0.0))
-    gamma = float(params.get("gamma", 1.0))
-
-    if brightness != 1.0:
-        img = ImageEnhance.Brightness(img).enhance(brightness)
-    if exposure != 1.0:
-        img = apply_exposure(img, exposure)
-    if contrast != 1.0:
-        img = ImageEnhance.Contrast(img).enhance(contrast)
-    if alpha != 1.0 or beta != 0.0:
-        img = apply_alpha_beta(img, alpha, beta)
-    if gamma != 1.0:
-        img = apply_gamma(img, gamma)
-    img = apply_tone_region(img, whites - 1.0, WHITES_WEIGHTS)
-    img = apply_tone_region(img, blacks - 1.0, BLACKS_WEIGHTS)
-    img = apply_tone_region(img, shadows - 1.0, SHADOWS_WEIGHTS)
-    if saturation != 1.0:
-        img = ImageEnhance.Color(img).enhance(saturation)
-    img = apply_vibrance(img, vibrance - 1.0)
-    img = apply_warmth(img, warmth)
-    if pop != 1.0:
-        img = ImageEnhance.Contrast(img).enhance(pop)
-        img = ImageEnhance.Color(img).enhance(1 + (pop - 1) * 0.35)
-    img = apply_channel_balance(img, r, g, b)
-    img = apply_vignette(img, vignette)
+    img = _run_tone_pipeline(img, params)
 
     grayscale_method = str(params.get("grayscale_method", "luminosity"))
     grayscale_intensity = float(params.get("grayscale_intensity", 0.0))

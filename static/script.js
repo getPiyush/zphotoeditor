@@ -394,13 +394,7 @@ function updateHueRangeVisual() {
 }
 
 function hasAnyPendingPanel() {
-  return (
-    sliderGroupPending(LIGHT_SLIDER_IDS) ||
-    sliderGroupPending(COLOR_SLIDER_IDS) ||
-    isGrayscalePending() ||
-    isFiltersPending() ||
-    isIsolationPending()
-  );
+  return PANELS.some((panel) => panel.isPending());
 }
 
 // Marks a panel's Apply/Reset pair enabled/disabled, flags its accordion
@@ -416,31 +410,15 @@ function setPanelPendingUI(applyBtn, resetBtn, panelItem, indicator, pending) {
 // Each panel's Apply/Reset pair is only enabled while that panel actually has
 // a pending (not yet Applied) change -- there's nothing to apply or reset otherwise.
 function updatePanelButtons() {
-  const lightPending = Boolean(state.imageId) && sliderGroupPending(LIGHT_SLIDER_IDS);
-  setPanelPendingUI(applyLightBtn, resetLightBtn, lightPanelItem, lightPendingIndicator, lightPending);
-
-  const colorPending = Boolean(state.imageId) && sliderGroupPending(COLOR_SLIDER_IDS);
-  setPanelPendingUI(applyColorBtn, resetColorBtn, colorPanelItem, colorPendingIndicator, colorPending);
-
-  const grayscalePending = Boolean(state.imageId) && isGrayscalePending();
-  setPanelPendingUI(applyGrayscaleBtn, resetGrayscaleBtn, grayscalePanelItem, grayscalePendingIndicator, grayscalePending);
-
-  const filtersPending = Boolean(state.imageId) && isFiltersPending();
-  setPanelPendingUI(applyFilterBtn, resetFilterBtn, filtersPanelItem, filtersPendingIndicator, filtersPending);
-
-  const isolationPending = Boolean(state.imageId) && isIsolationPending();
-  setPanelPendingUI(applyIsolationBtn, resetIsolationBtn, isolationPanelItem, isolationPendingIndicator, isolationPending);
-
-  const pendingPanelNames = [
-    lightPending && "Light",
-    colorPending && "Color",
-    grayscalePending && "Grayscale",
-    filtersPending && "Filters",
-    isolationPending && "Color Isolation",
-  ].filter(Boolean);
-  pendingChangesBanner.hidden = pendingPanelNames.length === 0;
-  pendingChangesBanner.textContent = pendingPanelNames.length
-    ? `Pending changes in ${pendingPanelNames.join(", ")} (exported image will not have these pending changes applied)`
+  const pendingNames = [];
+  for (const panel of PANELS) {
+    const pending = Boolean(state.imageId) && panel.isPending();
+    setPanelPendingUI(panel.applyBtn, panel.resetBtn, panel.item, panel.indicator, pending);
+    if (pending) pendingNames.push(panel.name);
+  }
+  pendingChangesBanner.hidden = pendingNames.length === 0;
+  pendingChangesBanner.textContent = pendingNames.length
+    ? `Pending changes in ${pendingNames.join(", ")} (exported image will not have these pending changes applied)`
     : "";
 }
 
@@ -477,30 +455,12 @@ function resetSliderPanel(sliderIds) {
     const output = document.querySelector(`[data-out="${id}"]`);
     if (output) output.textContent = parseFloat(el.value).toFixed(2);
   }
-  updatePanelButtons();
-  refreshLivePreviewOverlay();
 }
 
 function collectPendingParams() {
   const params = {};
-  for (const id of [...LIGHT_SLIDER_IDS, ...COLOR_SLIDER_IDS]) {
-    const raw = parseFloat(document.getElementById(id).value);
-    const baseline = state.sliderBaseline[id];
-    if (raw !== baseline) params[id] = sliderAdjustment(id, raw, baseline);
-  }
-  if (isGrayscalePending()) {
-    params.grayscale_method = grayscaleMethod.value;
-    params.grayscale_intensity = parseFloat(grayscaleIntensity.value);
-  }
-  if (isFiltersPending()) {
-    params.filter_preset = filterPreset.value;
-    params.filter_intensity = parseFloat(filterIntensity.value);
-  }
-  if (isIsolationPending()) {
-    params.isolation_hue_min = parseFloat(isolationHueMin.value);
-    params.isolation_hue_max = parseFloat(isolationHueMax.value);
-    params.isolation_min_saturation = parseFloat(isolationMinSaturation.value);
-    params.isolation_tone = parseFloat(isolationTone.value);
+  for (const panel of PANELS) {
+    if (panel.isPending()) Object.assign(params, panel.collectParams());
   }
   return params;
 }
@@ -946,21 +906,135 @@ async function exportCurrentImage(format, filename) {
   setStatus("");
 }
 
-function applyPanel(sliderIds) {
-  if (!state.imageId) return;
+function collectAllSliderParams(sliderIds) {
   const params = {};
+  for (const id of sliderIds) {
+    const raw = parseFloat(document.getElementById(id).value);
+    params[id] = sliderAdjustment(id, raw, state.sliderBaseline[id]);
+  }
+  return params;
+}
+
+function sliderPanelChangeLabel(sliderIds) {
   const changed = [];
   for (const id of sliderIds) {
-    const el = document.getElementById(id);
-    const raw = parseFloat(el.value);
+    const raw = parseFloat(document.getElementById(id).value);
     const baseline = state.sliderBaseline[id];
-    params[id] = sliderAdjustment(id, raw, baseline);
     if (raw !== baseline) changed.push(`${SLIDER_LABELS[id] || id} ${raw.toFixed(2)}`);
   }
-  if (!changed.length) return;
-  commitStep(params, changed.join(", "), true);
+  return changed.join(", ");
+}
+
+function commitSliderPanelBaseline(sliderIds) {
   for (const id of sliderIds) state.sliderBaseline[id] = parseFloat(document.getElementById(id).value);
+}
+
+// Declarative registry of every panel with its own pending/Apply/Reset state.
+// Each entry says how to detect a pending (not yet applied) change, how to
+// turn the current controls into commit params + a history label, what to do
+// to the controls after a successful Apply, and how to reset them. Driving
+// updatePanelButtons/collectPendingParams/hasAnyPendingPanel and the
+// Apply/Reset click wiring off this one array means adding a new panel is a
+// single new entry here instead of an edit to each of those functions.
+const PANELS = [
+  {
+    name: "Light",
+    applyBtn: applyLightBtn,
+    resetBtn: resetLightBtn,
+    item: lightPanelItem,
+    indicator: lightPendingIndicator,
+    isPending: () => sliderGroupPending(LIGHT_SLIDER_IDS),
+    collectParams: () => collectAllSliderParams(LIGHT_SLIDER_IDS),
+    buildLabel: () => sliderPanelChangeLabel(LIGHT_SLIDER_IDS),
+    afterApply: () => commitSliderPanelBaseline(LIGHT_SLIDER_IDS),
+    resetControls: () => resetSliderPanel(LIGHT_SLIDER_IDS),
+  },
+  {
+    name: "Color",
+    applyBtn: applyColorBtn,
+    resetBtn: resetColorBtn,
+    item: colorPanelItem,
+    indicator: colorPendingIndicator,
+    isPending: () => sliderGroupPending(COLOR_SLIDER_IDS),
+    collectParams: () => collectAllSliderParams(COLOR_SLIDER_IDS),
+    buildLabel: () => sliderPanelChangeLabel(COLOR_SLIDER_IDS),
+    afterApply: () => commitSliderPanelBaseline(COLOR_SLIDER_IDS),
+    resetControls: () => resetSliderPanel(COLOR_SLIDER_IDS),
+  },
+  {
+    name: "Grayscale",
+    applyBtn: applyGrayscaleBtn,
+    resetBtn: resetGrayscaleBtn,
+    item: grayscalePanelItem,
+    indicator: grayscalePendingIndicator,
+    isPending: isGrayscalePending,
+    collectParams: () => ({
+      grayscale_method: grayscaleMethod.value,
+      grayscale_intensity: parseFloat(grayscaleIntensity.value),
+    }),
+    buildLabel: () => {
+      const methodLabel = grayscaleMethod.options[grayscaleMethod.selectedIndex].text;
+      const intensity = parseFloat(grayscaleIntensity.value);
+      return `Grayscale (${methodLabel}, ${Math.round(intensity * 100)}%)`;
+    },
+    afterApply: resetGrayscaleControls,
+    resetControls: resetGrayscaleControls,
+  },
+  {
+    name: "Filters",
+    applyBtn: applyFilterBtn,
+    resetBtn: resetFilterBtn,
+    item: filtersPanelItem,
+    indicator: filtersPendingIndicator,
+    isPending: isFiltersPending,
+    collectParams: () => ({
+      filter_preset: filterPreset.value,
+      filter_intensity: parseFloat(filterIntensity.value),
+    }),
+    buildLabel: () => {
+      const label = filterPreset.options[filterPreset.selectedIndex].text;
+      const intensity = parseFloat(filterIntensity.value);
+      return `${label} filter ${Math.round(intensity * 100)}%`;
+    },
+    afterApply: resetFilterControls,
+    resetControls: resetFilterControls,
+  },
+  {
+    name: "Color Isolation",
+    applyBtn: applyIsolationBtn,
+    resetBtn: resetIsolationBtn,
+    item: isolationPanelItem,
+    indicator: isolationPendingIndicator,
+    isPending: isIsolationPending,
+    collectParams: () => ({
+      isolation_hue_min: parseFloat(isolationHueMin.value),
+      isolation_hue_max: parseFloat(isolationHueMax.value),
+      isolation_min_saturation: parseFloat(isolationMinSaturation.value),
+      isolation_tone: parseFloat(isolationTone.value),
+    }),
+    buildLabel: () => {
+      const hueMin = parseFloat(isolationHueMin.value);
+      const hueMax = parseFloat(isolationHueMax.value);
+      const minSaturation = parseFloat(isolationMinSaturation.value);
+      const tone = parseFloat(isolationTone.value);
+      return `Hue ${hueMin}°-${hueMax}° isolation (sat min ${minSaturation.toFixed(2)}, tone ${tone.toFixed(2)})`;
+    },
+    afterApply: resetIsolationControls,
+    resetControls: resetIsolationControls,
+  },
+];
+
+function applyPanelGeneric(panel) {
+  if (!state.imageId || !panel.isPending()) return;
+  commitStep(panel.collectParams(), panel.buildLabel(), true);
+  panel.afterApply();
   updatePanelButtons();
+}
+
+function resetPanelGeneric(panel) {
+  panel.resetControls();
+  updatePanelButtons();
+  refreshLivePreviewOverlay();
 }
 
 sliders.forEach((s) => {
@@ -972,10 +1046,10 @@ sliders.forEach((s) => {
   });
 });
 
-applyLightBtn.addEventListener("click", () => applyPanel(LIGHT_SLIDER_IDS));
-resetLightBtn.addEventListener("click", () => resetSliderPanel(LIGHT_SLIDER_IDS));
-applyColorBtn.addEventListener("click", () => applyPanel(COLOR_SLIDER_IDS));
-resetColorBtn.addEventListener("click", () => resetSliderPanel(COLOR_SLIDER_IDS));
+for (const panel of PANELS) {
+  panel.applyBtn.addEventListener("click", () => applyPanelGeneric(panel));
+  panel.resetBtn.addEventListener("click", () => resetPanelGeneric(panel));
+}
 
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
@@ -1615,28 +1689,6 @@ grayscaleMethod.addEventListener("change", () => {
   scheduleLivePreviewUpdate();
 });
 
-applyGrayscaleBtn.addEventListener("click", () => {
-  if (!state.imageId || !isGrayscalePending()) return;
-  const method = grayscaleMethod.value;
-  const intensity = parseFloat(grayscaleIntensity.value);
-  const methodLabel = grayscaleMethod.options[grayscaleMethod.selectedIndex].text;
-
-  commitStep(
-    { grayscale_method: method, grayscale_intensity: intensity },
-    `Grayscale (${methodLabel}, ${Math.round(intensity * 100)}%)`,
-    true
-  );
-
-  resetGrayscaleControls();
-  updatePanelButtons();
-});
-
-resetGrayscaleBtn.addEventListener("click", () => {
-  resetGrayscaleControls();
-  updatePanelButtons();
-  refreshLivePreviewOverlay();
-});
-
 filterIntensity.addEventListener("input", () => {
   document.querySelector('[data-out="filterIntensity"]').textContent = parseFloat(filterIntensity.value).toFixed(2);
   updatePanelButtons();
@@ -1645,28 +1697,6 @@ filterIntensity.addEventListener("input", () => {
 filterPreset.addEventListener("change", () => {
   updatePanelButtons();
   scheduleLivePreviewUpdate();
-});
-
-applyFilterBtn.addEventListener("click", () => {
-  if (!state.imageId || !isFiltersPending()) return;
-  const preset = filterPreset.value;
-  const intensity = parseFloat(filterIntensity.value);
-  const label = filterPreset.options[filterPreset.selectedIndex].text;
-
-  commitStep(
-    { filter_preset: preset, filter_intensity: intensity },
-    `${label} filter ${Math.round(intensity * 100)}%`,
-    true
-  );
-
-  resetFilterControls();
-  updatePanelButtons();
-});
-
-resetFilterBtn.addEventListener("click", () => {
-  resetFilterControls();
-  updatePanelButtons();
-  refreshLivePreviewOverlay();
 });
 
 isolationHueMin.addEventListener("input", () => {
@@ -1700,25 +1730,3 @@ isolationTone.addEventListener("input", () => {
   scheduleLivePreviewUpdate();
 });
 
-applyIsolationBtn.addEventListener("click", () => {
-  if (!state.imageId || !isIsolationPending()) return;
-  const hueMin = parseFloat(isolationHueMin.value);
-  const hueMax = parseFloat(isolationHueMax.value);
-  const minSaturation = parseFloat(isolationMinSaturation.value);
-  const tone = parseFloat(isolationTone.value);
-
-  commitStep(
-    { isolation_hue_min: hueMin, isolation_hue_max: hueMax, isolation_min_saturation: minSaturation, isolation_tone: tone },
-    `Hue ${hueMin}°-${hueMax}° isolation (sat min ${minSaturation.toFixed(2)}, tone ${tone.toFixed(2)})`,
-    true
-  );
-
-  resetIsolationControls();
-  updatePanelButtons();
-});
-
-resetIsolationBtn.addEventListener("click", () => {
-  resetIsolationControls();
-  updatePanelButtons();
-  refreshLivePreviewOverlay();
-});
