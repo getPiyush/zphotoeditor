@@ -1,13 +1,33 @@
 const fileInput = document.getElementById("fileInput");
 const resetBtn = document.getElementById("resetBtn");
-const saveBtn = document.getElementById("saveBtn");
-const downloadBtn = document.getElementById("downloadBtn");
+const exportBtn = document.getElementById("exportBtn");
+const exportDialog = document.getElementById("exportDialog");
+const exportFileName = document.getElementById("exportFileName");
+const exportFormat = document.getElementById("exportFormat");
+const exportFormatOptionGroups = document.querySelectorAll("[data-export-options]");
+const exportPngCompressLevel = document.getElementById("exportPngCompressLevel");
+const exportPngOptimize = document.getElementById("exportPngOptimize");
+const exportJpegQuality = document.getElementById("exportJpegQuality");
+const exportJpegSubsampling = document.getElementById("exportJpegSubsampling");
+const exportJpegProgressive = document.getElementById("exportJpegProgressive");
+const exportJpegOptimize = document.getElementById("exportJpegOptimize");
+const exportWebpLossless = document.getElementById("exportWebpLossless");
+const exportWebpQuality = document.getElementById("exportWebpQuality");
+const exportWebpMethod = document.getElementById("exportWebpMethod");
+const exportTiffCompression = document.getElementById("exportTiffCompression");
+const exportTiffQuality = document.getElementById("exportTiffQuality");
+const exportTiffQualityField = document.getElementById("exportTiffQualityField");
+const exportGifColors = document.getElementById("exportGifColors");
+const exportGifOptimize = document.getElementById("exportGifOptimize");
+const exportIcoSizeChecks = document.querySelectorAll(".exportIcoSize");
 const togglePanelBtn = document.getElementById("togglePanelBtn");
 const togglePanelLabel = document.getElementById("togglePanelLabel");
+const pendingChangesBanner = document.getElementById("pendingChangesBanner");
 const layout = document.querySelector(".layout");
 const dropHint = document.getElementById("dropHint");
 const imageWrap = document.getElementById("imageWrap");
 const preview = document.getElementById("preview");
+const previewCropOverlay = document.getElementById("previewCropOverlay");
 const initialPreviewText = document.getElementById("initialPreviewText");
 const cropBox = document.getElementById("cropBox");
 const applyCropBtn = document.getElementById("applyCropBtn");
@@ -32,6 +52,35 @@ const enhancement = document.getElementById("enhancement");
 const enhancementStrength = document.getElementById("enhancementStrength");
 const enhancementStrengthField = document.getElementById("enhancementStrengthField");
 const enhancementStrengthOutput = document.getElementById("enhancementStrengthOutput");
+const applyLightBtn = document.getElementById("applyLightBtn");
+const resetLightBtn = document.getElementById("resetLightBtn");
+const lightPanelItem = document.getElementById("lightPanelItem");
+const lightPendingIndicator = document.getElementById("lightPendingIndicator");
+const applyColorBtn = document.getElementById("applyColorBtn");
+const resetColorBtn = document.getElementById("resetColorBtn");
+const colorPanelItem = document.getElementById("colorPanelItem");
+const colorPendingIndicator = document.getElementById("colorPendingIndicator");
+const grayscaleMethod = document.getElementById("grayscaleMethod");
+const grayscaleIntensity = document.getElementById("grayscaleIntensity");
+const applyGrayscaleBtn = document.getElementById("applyGrayscaleBtn");
+const resetGrayscaleBtn = document.getElementById("resetGrayscaleBtn");
+const grayscalePanelItem = document.getElementById("grayscalePanelItem");
+const grayscalePendingIndicator = document.getElementById("grayscalePendingIndicator");
+const filterPreset = document.getElementById("filterPreset");
+const filterIntensity = document.getElementById("filterIntensity");
+const applyFilterBtn = document.getElementById("applyFilterBtn");
+const resetFilterBtn = document.getElementById("resetFilterBtn");
+const filtersPanelItem = document.getElementById("filtersPanelItem");
+const filtersPendingIndicator = document.getElementById("filtersPendingIndicator");
+const isolationHueMin = document.getElementById("isolationHueMin");
+const isolationHueMax = document.getElementById("isolationHueMax");
+const hueRangeSelected = document.getElementById("hueRangeSelected");
+const isolationMinSaturation = document.getElementById("isolationMinSaturation");
+const isolationTone = document.getElementById("isolationTone");
+const applyIsolationBtn = document.getElementById("applyIsolationBtn");
+const resetIsolationBtn = document.getElementById("resetIsolationBtn");
+const isolationPanelItem = document.getElementById("isolationPanelItem");
+const isolationPendingIndicator = document.getElementById("isolationPendingIndicator");
 const statusEl = document.getElementById("status");
 const historyList = document.getElementById("historyList");
 const historyBackBtn = document.getElementById("historyBackBtn");
@@ -52,10 +101,23 @@ const enhanceProgressText = document.getElementById("enhanceProgressText");
 const enhanceProgressFill = document.getElementById("enhanceProgressFill");
 const enhanceCancelBtn = document.getElementById("enhanceCancelBtn");
 
+const EXPORT_EXTENSIONS = {
+  png: "png",
+  jpeg: "jpg",
+  webp: "webp",
+  tiff: "tiff",
+  bmp: "bmp",
+  gif: "gif",
+  ico: "ico",
+};
+
 const SLIDER_LABELS = {
   brightness: "Brightness",
   exposure: "Exposure",
   contrast: "Contrast",
+  alpha: "Alpha (gain)",
+  beta: "Beta (bias)",
+  gamma: "Gamma",
   whites: "Whites",
   blacks: "Blacks",
   shadows: "Shadows",
@@ -69,10 +131,15 @@ const SLIDER_LABELS = {
   b: "Blue channel",
 };
 
+const ADDITIVE_SLIDERS = ["warmth", "vignette", "beta"];
+
 const sliders = [
   "brightness",
   "exposure",
   "contrast",
+  "alpha",
+  "beta",
+  "gamma",
   "whites",
   "blacks",
   "shadows",
@@ -85,6 +152,13 @@ const sliders = [
   "g",
   "b",
 ].map((id) => document.getElementById(id));
+
+// The panels that get a live, viewport-cropped preview plus their own Apply
+// button (every panel except Zoom/Crop/Transform/Enhancements, which commit
+// their own actions immediately and don't have a "pending" adjustment state).
+const LIGHT_SLIDER_IDS = ["brightness", "exposure", "contrast", "alpha", "beta", "gamma", "whites", "blacks", "shadows"];
+const COLOR_SLIDER_IDS = ["saturation", "vibrance", "warmth", "pop", "vignette", "r", "g", "b"];
+
 const accordionHeaders = document.querySelectorAll(".accordion-header");
 
 accordionHeaders.forEach((header) => {
@@ -120,11 +194,11 @@ imageWrap.hidden = false;
 dropHint.hidden = true;
 
 function neutralSliderValues() {
-  return Object.fromEntries(sliders.map((s) => [s.id, ["warmth", "vignette"].includes(s.id) ? 0 : 1]));
+  return Object.fromEntries(sliders.map((s) => [s.id, ADDITIVE_SLIDERS.includes(s.id) ? 0 : 1]));
 }
 
 function sliderAdjustment(id, raw, baseline) {
-  return ["warmth", "vignette"].includes(id) ? raw - baseline : raw / baseline;
+  return ADDITIVE_SLIDERS.includes(id) ? raw - baseline : raw / baseline;
 }
 
 function applySliderValues(values) {
@@ -147,14 +221,6 @@ function setCropBoxPosition(x, y, w, h) {
   cropBox.style.top = `${y}px`;
   cropBox.style.width = `${w}px`;
   cropBox.style.height = `${h}px`;
-}
-
-function normalizeRect(rect) {
-  const x = Math.min(rect.x, rect.x + rect.w);
-  const y = Math.min(rect.y, rect.y + rect.h);
-  const w = Math.abs(rect.w);
-  const h = Math.abs(rect.h);
-  return { x, y, w, h };
 }
 
 function getPointerInWrap(e) {
@@ -182,6 +248,9 @@ function applyPreviewTransform() {
   preview.style.rotate = "0deg";
   preview.style.cursor = zoom > 1 && state.cropMode === "drag" ? "grab" : "default";
   zoomLevelEl.textContent = `${Math.round(zoom * 100)}%`;
+  // Zooming/panning changes what's visible, so any pending panel's live
+  // preview needs to be re-cropped to the new viewport.
+  scheduleLivePreviewUpdate();
 }
 
 function setCropMode(mode) {
@@ -218,12 +287,24 @@ function showActualSize() {
   applyPreviewTransform();
 }
 
+// Zooms while keeping the point at (anchorX, anchorY) — in imageWrap-relative
+// coordinates — visually fixed, by solving for the pan that keeps
+// anchor = pan + zoom * localPoint constant across the zoom change.
+function zoomAtPoint(nextZoom, anchorX, anchorY) {
+  const previousZoom = state.zoom;
+  const clampedZoom = clamp(nextZoom, minimumZoom(), 6);
+  if (clampedZoom === previousZoom) return;
+  const ratio = clampedZoom / previousZoom;
+  state.panX = anchorX - ratio * (anchorX - state.panX);
+  state.panY = anchorY - ratio * (anchorY - state.panY);
+  state.zoom = clampedZoom;
+  applyPreviewTransform();
+}
+
 function changeZoom(delta) {
   if (!state.imageId) return;
-  const nextZoom = clamp(state.zoom * delta, minimumZoom(), 6);
-  if (nextZoom === state.zoom) return;
-  state.zoom = nextZoom;
-  applyPreviewTransform();
+  const rect = imageWrap.getBoundingClientRect();
+  zoomAtPoint(state.zoom * delta, rect.width / 2, rect.height / 2);
 }
 
 function setStatus(text, modal = false) {
@@ -276,6 +357,257 @@ function currentParams() {
   return params;
 }
 
+// --- Per-panel live preview -------------------------------------------------
+// Light/Color/Grayscale/Filters each have their own "pending" adjustment: the
+// panel's controls have moved away from their applied state, but nothing has
+// been baked into the source image yet. While any panel is pending, only the
+// portion of the image currently visible in the viewport is re-rendered with
+// every pending panel's settings and shown as an overlay -- so dragging a
+// slider stays responsive no matter how large the source photo is. Clicking a
+// panel's Apply button bakes just that panel's settings into the real source
+// image and adds a history step; other panels stay pending until their own
+// Apply is clicked.
+
+function sliderGroupPending(ids) {
+  return ids.some((id) => parseFloat(document.getElementById(id).value) !== state.sliderBaseline[id]);
+}
+
+function isGrayscalePending() {
+  return parseFloat(grayscaleIntensity.value) > 0;
+}
+
+function isFiltersPending() {
+  return filterPreset.value !== "none";
+}
+
+function isIsolationPending() {
+  return parseFloat(isolationHueMin.value) > 0 || parseFloat(isolationHueMax.value) < 360;
+}
+
+// Keeps the two hue-range thumbs from crossing, and repaints the highlighted
+// segment of the spectrum strip to match their current positions.
+function updateHueRangeVisual() {
+  const min = parseFloat(isolationHueMin.value);
+  const max = parseFloat(isolationHueMax.value);
+  hueRangeSelected.style.left = `${(min / 360) * 100}%`;
+  hueRangeSelected.style.width = `${Math.max(0, (max - min) / 360) * 100}%`;
+}
+
+function hasAnyPendingPanel() {
+  return (
+    sliderGroupPending(LIGHT_SLIDER_IDS) ||
+    sliderGroupPending(COLOR_SLIDER_IDS) ||
+    isGrayscalePending() ||
+    isFiltersPending() ||
+    isIsolationPending()
+  );
+}
+
+// Marks a panel's Apply/Reset pair enabled/disabled, flags its accordion
+// header with an asterisk, and lightens its background -- all driven by the
+// same "does this panel have an unapplied change" check.
+function setPanelPendingUI(applyBtn, resetBtn, panelItem, indicator, pending) {
+  applyBtn.disabled = !pending;
+  resetBtn.disabled = !pending;
+  panelItem.classList.toggle("has-pending", pending);
+  indicator.hidden = !pending;
+}
+
+// Each panel's Apply/Reset pair is only enabled while that panel actually has
+// a pending (not yet Applied) change -- there's nothing to apply or reset otherwise.
+function updatePanelButtons() {
+  const lightPending = Boolean(state.imageId) && sliderGroupPending(LIGHT_SLIDER_IDS);
+  setPanelPendingUI(applyLightBtn, resetLightBtn, lightPanelItem, lightPendingIndicator, lightPending);
+
+  const colorPending = Boolean(state.imageId) && sliderGroupPending(COLOR_SLIDER_IDS);
+  setPanelPendingUI(applyColorBtn, resetColorBtn, colorPanelItem, colorPendingIndicator, colorPending);
+
+  const grayscalePending = Boolean(state.imageId) && isGrayscalePending();
+  setPanelPendingUI(applyGrayscaleBtn, resetGrayscaleBtn, grayscalePanelItem, grayscalePendingIndicator, grayscalePending);
+
+  const filtersPending = Boolean(state.imageId) && isFiltersPending();
+  setPanelPendingUI(applyFilterBtn, resetFilterBtn, filtersPanelItem, filtersPendingIndicator, filtersPending);
+
+  const isolationPending = Boolean(state.imageId) && isIsolationPending();
+  setPanelPendingUI(applyIsolationBtn, resetIsolationBtn, isolationPanelItem, isolationPendingIndicator, isolationPending);
+
+  const pendingPanelNames = [
+    lightPending && "Light",
+    colorPending && "Color",
+    grayscalePending && "Grayscale",
+    filtersPending && "Filters",
+    isolationPending && "Color Isolation",
+  ].filter(Boolean);
+  pendingChangesBanner.hidden = pendingPanelNames.length === 0;
+  pendingChangesBanner.textContent = pendingPanelNames.length
+    ? `Pending changes in ${pendingPanelNames.join(", ")} (exported image will not have these pending changes applied)`
+    : "";
+}
+
+function resetGrayscaleControls() {
+  grayscaleMethod.value = "luminosity";
+  grayscaleIntensity.value = "0";
+  document.querySelector('[data-out="grayscaleIntensity"]').textContent = "0.00";
+}
+
+function resetFilterControls() {
+  filterPreset.value = "none";
+  filterIntensity.value = "1";
+  document.querySelector('[data-out="filterIntensity"]').textContent = "1.00";
+}
+
+function resetIsolationControls() {
+  isolationHueMin.value = "0";
+  isolationHueMax.value = "360";
+  isolationMinSaturation.value = "0";
+  isolationTone.value = "0";
+  document.querySelector('[data-out="isolationHueMin"]').textContent = "0°";
+  document.querySelector('[data-out="isolationHueMax"]').textContent = "360°";
+  document.querySelector('[data-out="isolationMinSaturation"]').textContent = "0.00";
+  document.querySelector('[data-out="isolationTone"]').textContent = "0.00";
+  updateHueRangeVisual();
+}
+
+// Discards a panel's in-progress slider movement, putting it back at its
+// last-applied (baseline) value rather than at the source image's original state.
+function resetSliderPanel(sliderIds) {
+  for (const id of sliderIds) {
+    const el = document.getElementById(id);
+    el.value = state.sliderBaseline[id];
+    const output = document.querySelector(`[data-out="${id}"]`);
+    if (output) output.textContent = parseFloat(el.value).toFixed(2);
+  }
+  updatePanelButtons();
+  refreshLivePreviewOverlay();
+}
+
+function collectPendingParams() {
+  const params = {};
+  for (const id of [...LIGHT_SLIDER_IDS, ...COLOR_SLIDER_IDS]) {
+    const raw = parseFloat(document.getElementById(id).value);
+    const baseline = state.sliderBaseline[id];
+    if (raw !== baseline) params[id] = sliderAdjustment(id, raw, baseline);
+  }
+  if (isGrayscalePending()) {
+    params.grayscale_method = grayscaleMethod.value;
+    params.grayscale_intensity = parseFloat(grayscaleIntensity.value);
+  }
+  if (isFiltersPending()) {
+    params.filter_preset = filterPreset.value;
+    params.filter_intensity = parseFloat(filterIntensity.value);
+  }
+  if (isIsolationPending()) {
+    params.isolation_hue_min = parseFloat(isolationHueMin.value);
+    params.isolation_hue_max = parseFloat(isolationHueMax.value);
+    params.isolation_min_saturation = parseFloat(isolationMinSaturation.value);
+    params.isolation_tone = parseFloat(isolationTone.value);
+  }
+  return params;
+}
+
+// Maps the portion of the source image currently visible inside imageWrap
+// (accounting for the current zoom/pan) back into source-pixel coordinates.
+function currentViewportCropRect() {
+  if (!state.naturalWidth || !state.naturalHeight) return null;
+  const wrapRect = imageWrap.getBoundingClientRect();
+  const previewRect = preview.getBoundingClientRect();
+  if (previewRect.width <= 0 || previewRect.height <= 0) return null;
+
+  const visLeft = Math.max(wrapRect.left, previewRect.left);
+  const visTop = Math.max(wrapRect.top, previewRect.top);
+  const visRight = Math.min(wrapRect.right, previewRect.right);
+  const visBottom = Math.min(wrapRect.bottom, previewRect.bottom);
+  if (visRight <= visLeft || visBottom <= visTop) return null;
+
+  const scaleX = state.naturalWidth / previewRect.width;
+  const scaleY = state.naturalHeight / previewRect.height;
+  const x = Math.round((visLeft - previewRect.left) * scaleX);
+  const y = Math.round((visTop - previewRect.top) * scaleY);
+  const w = Math.round((visRight - visLeft) * scaleX);
+  const h = Math.round((visBottom - visTop) * scaleY);
+
+  return {
+    x: clamp(x, 0, state.naturalWidth - 1),
+    y: clamp(y, 0, state.naturalHeight - 1),
+    w: clamp(w, 1, state.naturalWidth - clamp(x, 0, state.naturalWidth - 1)),
+    h: clamp(h, 1, state.naturalHeight - clamp(y, 0, state.naturalHeight - 1)),
+  };
+}
+
+let cropPreviewDebounce = null;
+let cropOverlayObjectUrl = null;
+let cropPreviewRequestId = 0;
+
+function hideCropOverlay() {
+  clearTimeout(cropPreviewDebounce);
+  previewCropOverlay.hidden = true;
+  if (cropOverlayObjectUrl) {
+    URL.revokeObjectURL(cropOverlayObjectUrl);
+    cropOverlayObjectUrl = null;
+  }
+}
+
+function refreshLivePreviewOverlay() {
+  updatePanelButtons();
+  if (hasAnyPendingPanel()) scheduleLivePreviewUpdate();
+  else hideCropOverlay();
+}
+
+function scheduleLivePreviewUpdate() {
+  clearTimeout(cropPreviewDebounce);
+  cropPreviewDebounce = setTimeout(updateLivePreviewOverlay, 150);
+}
+
+async function updateLivePreviewOverlay() {
+  if (!state.imageId || !hasAnyPendingPanel()) {
+    hideCropOverlay();
+    return;
+  }
+
+  const cropRect = currentViewportCropRect();
+  if (!cropRect) {
+    hideCropOverlay();
+    return;
+  }
+
+  const wrapRect = imageWrap.getBoundingClientRect();
+  const previewRect = preview.getBoundingClientRect();
+  const visLeft = Math.max(wrapRect.left, previewRect.left);
+  const visTop = Math.max(wrapRect.top, previewRect.top);
+  const visRight = Math.min(wrapRect.right, previewRect.right);
+  const visBottom = Math.min(wrapRect.bottom, previewRect.bottom);
+  const overlayLeft = visLeft - wrapRect.left;
+  const overlayTop = visTop - wrapRect.top;
+  const overlayWidth = Math.max(1, visRight - visLeft);
+  const overlayHeight = Math.max(1, visBottom - visTop);
+
+  const requestId = ++cropPreviewRequestId;
+  const res = await fetch(`/process/${state.imageId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...collectPendingParams(),
+      preview_crop: cropRect,
+      preview: { w: Math.round(overlayWidth), h: Math.round(overlayHeight) },
+    }),
+  });
+  // A newer request already superseded this one (e.g. the user kept dragging
+  // or panning); drop this response instead of flashing a stale frame.
+  if (requestId !== cropPreviewRequestId || !res.ok) return;
+
+  const blob = await res.blob();
+  const nextUrl = URL.createObjectURL(blob);
+  const previousUrl = cropOverlayObjectUrl;
+  cropOverlayObjectUrl = nextUrl;
+  previewCropOverlay.src = nextUrl;
+  previewCropOverlay.style.left = `${overlayLeft}px`;
+  previewCropOverlay.style.top = `${overlayTop}px`;
+  previewCropOverlay.style.width = `${overlayWidth}px`;
+  previewCropOverlay.style.height = `${overlayHeight}px`;
+  previewCropOverlay.hidden = false;
+  if (previousUrl) URL.revokeObjectURL(previousUrl);
+}
+
 async function commitStep(params, label, showModal = false) {
   if (!state.imageId) return;
   setStatus("Applying...", showModal);
@@ -301,6 +633,7 @@ async function commitStep(params, label, showModal = false) {
   }
   renderHistory();
   requestPreview();
+  refreshLivePreviewOverlay();
   setStatus("");
 }
 
@@ -327,6 +660,7 @@ function applyHistoryResponse(data) {
   applySliderValues(neutralSliderValues());
   renderHistory();
   requestPreview();
+  refreshLivePreviewOverlay();
 }
 
 async function restoreHistorySnapshot(snapshot) {
@@ -347,7 +681,6 @@ function recordHistoryStructureChange() {
 }
 
 function renderHistory() {
-  downloadBtn.hidden = state.history.length === 0;
   historyList.innerHTML = "";
   const activeId = state.currentStepId || "original";
 
@@ -498,6 +831,19 @@ async function revertTo(stepId) {
   setStatus("");
 }
 
+function committedPreviewParams() {
+  // Unlike currentParams(), this never includes a panel's in-progress slider
+  // values -- the base preview only ever shows the last *applied* state. Any
+  // pending (not yet Applied) adjustment is shown solely by the viewport-cropped
+  // overlay in updateLivePreviewOverlay(), not baked into the whole image.
+  return {
+    crop: null,
+    resize: null,
+    preview: currentPreviewSize(),
+    rotation: 0,
+  };
+}
+
 function requestPreview() {
   if (!state.imageId) return;
   clearTimeout(debounceTimer);
@@ -506,7 +852,7 @@ function requestPreview() {
     const res = await fetch(`/process/${state.imageId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(currentParams()),
+      body: JSON.stringify(committedPreviewParams()),
     });
     if (!res.ok) {
       setStatus("Failed to render preview");
@@ -525,60 +871,111 @@ function requestPreview() {
   }, 150);
 }
 
-async function downloadCurrentImage() {
+// Shows only the compression/quality controls relevant to the format
+// currently selected in the export dialog.
+function updateExportOptionsVisibility() {
+  const format = exportFormat.value;
+  exportFormatOptionGroups.forEach((group) => {
+    group.hidden = group.dataset.exportOptions !== format;
+  });
+  exportTiffQualityField.hidden = exportTiffCompression.value !== "jpeg";
+}
+
+// Reads the compression/quality controls for the currently selected export
+// format into the options payload sent to the backend.
+function collectExportOptions(format) {
+  switch (format) {
+    case "png":
+      return {
+        compress_level: parseInt(exportPngCompressLevel.value, 10),
+        optimize: exportPngOptimize.checked,
+      };
+    case "jpeg":
+      return {
+        quality: parseInt(exportJpegQuality.value, 10),
+        subsampling: exportJpegSubsampling.value,
+        progressive: exportJpegProgressive.checked,
+        optimize: exportJpegOptimize.checked,
+      };
+    case "webp":
+      return {
+        lossless: exportWebpLossless.checked,
+        quality: parseInt(exportWebpQuality.value, 10),
+        method: parseInt(exportWebpMethod.value, 10),
+      };
+    case "tiff":
+      return {
+        compression: exportTiffCompression.value,
+        quality: parseInt(exportTiffQuality.value, 10),
+      };
+    case "gif":
+      return {
+        colors: parseInt(exportGifColors.value, 10),
+        optimize: exportGifOptimize.checked,
+      };
+    case "ico":
+      return {
+        sizes: Array.from(exportIcoSizeChecks)
+          .filter((el) => el.checked)
+          .map((el) => parseInt(el.value, 10)),
+      };
+    default:
+      return {};
+  }
+}
+
+async function exportCurrentImage(format, filename) {
   if (!state.imageId) return;
 
-  setStatus("Preparing download...");
+  setStatus("Preparing export...");
   const params = currentParams();
   delete params.preview;
-  const res = await fetch(`/process/${state.imageId}`, {
+  const options = collectExportOptions(format);
+  const res = await fetch(`/export/${state.imageId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
+    body: JSON.stringify({ params, format, options }),
   });
   if (!res.ok) {
-    setStatus("Download failed");
+    const data = await res.json().catch(() => ({}));
+    setStatus(data.error || "Export failed");
     return;
   }
 
-  const blobUrl = URL.createObjectURL(await res.blob());
-  const link = document.createElement("a");
-  link.href = blobUrl;
-  link.download = "edited-image.png";
-  link.click();
-  URL.revokeObjectURL(blobUrl);
+  downloadBlob(await res.blob(), filename);
   setStatus("");
 }
 
-let adjustDebounceTimer = null;
-
-function commitAdjustments() {
+function applyPanel(sliderIds) {
+  if (!state.imageId) return;
   const params = {};
   const changed = [];
-  for (const s of sliders) {
-    const raw = parseFloat(s.value);
-    const baseline = state.sliderBaseline[s.id];
-    params[s.id] = sliderAdjustment(s.id, raw, baseline);
-    if (raw !== baseline) changed.push(`${SLIDER_LABELS[s.id] || s.id} ${raw.toFixed(2)}`);
+  for (const id of sliderIds) {
+    const el = document.getElementById(id);
+    const raw = parseFloat(el.value);
+    const baseline = state.sliderBaseline[id];
+    params[id] = sliderAdjustment(id, raw, baseline);
+    if (raw !== baseline) changed.push(`${SLIDER_LABELS[id] || id} ${raw.toFixed(2)}`);
   }
   if (!changed.length) return;
-  commitStep(params, changed.join(", "));
-  for (const s of sliders) state.sliderBaseline[s.id] = parseFloat(s.value);
+  commitStep(params, changed.join(", "), true);
+  for (const id of sliderIds) state.sliderBaseline[id] = parseFloat(document.getElementById(id).value);
+  updatePanelButtons();
 }
 
 sliders.forEach((s) => {
   s.addEventListener("input", () => {
     const output = document.querySelector(`[data-out="${s.id}"]`);
     if (output) output.textContent = parseFloat(s.value).toFixed(2);
-    requestPreview();
-  });
-  s.addEventListener("change", () => {
-    // Batch every adjustment slider (brightness, exposure, contrast, r, g, b)
-    // touched in one sitting into a single history step, instead of one per slider.
-    clearTimeout(adjustDebounceTimer);
-    adjustDebounceTimer = setTimeout(commitAdjustments, 2000);
+    updatePanelButtons();
+    scheduleLivePreviewUpdate();
   });
 });
+
+applyLightBtn.addEventListener("click", () => applyPanel(LIGHT_SLIDER_IDS));
+resetLightBtn.addEventListener("click", () => resetSliderPanel(LIGHT_SLIDER_IDS));
+applyColorBtn.addEventListener("click", () => applyPanel(COLOR_SLIDER_IDS));
+resetColorBtn.addEventListener("click", () => resetSliderPanel(COLOR_SLIDER_IDS));
 
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
@@ -615,6 +1012,10 @@ fileInput.addEventListener("change", async () => {
   };
 
   applySliderValues(neutralSliderValues());
+  resetGrayscaleControls();
+  resetFilterControls();
+  resetIsolationControls();
+  hideCropOverlay();
   initialPreviewText.hidden = true;
   preview.hidden = false;
   resizeW.value = data.width;
@@ -629,7 +1030,7 @@ fileInput.addEventListener("change", async () => {
   fitPreviewToPane();
   requestPreview();
   resetBtn.disabled = false;
-  saveBtn.disabled = false;
+  exportBtn.disabled = false;
   applyCropBtn.disabled = false;
   clearCropBtn.disabled = false;
   applyResizeBtn.disabled = false;
@@ -650,9 +1051,18 @@ fileInput.addEventListener("change", async () => {
   lockAspect.disabled = false;
   enhancement.disabled = false;
   enhancementStrength.disabled = false;
+  grayscaleMethod.disabled = false;
+  grayscaleIntensity.disabled = false;
+  filterPreset.disabled = false;
+  filterIntensity.disabled = false;
+  isolationHueMin.disabled = false;
+  isolationHueMax.disabled = false;
+  isolationMinSaturation.disabled = false;
+  isolationTone.disabled = false;
   historyResetBtn.disabled = false;
   importHistoryBtn.disabled = false;
   exportHistoryBtn.disabled = false;
+  updatePanelButtons();
   setStatus("");
 });
 
@@ -673,6 +1083,9 @@ resetBtn.addEventListener("click", async () => {
     setStatus("Revert failed");
     return;
   }
+  resetGrayscaleControls();
+  resetFilterControls();
+  resetIsolationControls();
   applyHistoryResponse(await res.json());
   state.historyUndo = [];
   state.historyRedo = [];
@@ -705,13 +1118,11 @@ cropDragBtn.addEventListener("click", () => setCropMode("drag"));
 cropSelectBtn.addEventListener("click", () => setCropMode("select"));
 
 imageWrap.addEventListener("wheel", (e) => {
+  if (!state.imageId) return;
   e.preventDefault();
   const delta = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-  const previousZoom = state.zoom;
-  const nextZoom = clamp(previousZoom * delta, minimumZoom(), 6);
-  if (nextZoom === previousZoom) return;
-  state.zoom = nextZoom;
-  applyPreviewTransform();
+  const pointer = getPointerInWrap(e);
+  zoomAtPoint(state.zoom * delta, pointer.x, pointer.y);
 }, { passive: false });
 
 imageWrap.addEventListener("dragstart", (e) => e.preventDefault());
@@ -720,36 +1131,46 @@ window.addEventListener("resize", () => {
   if (!state.imageId) return;
   fitPreviewToPane();
   if (state.zoom > 1) applyPreviewTransform();
+  else scheduleLivePreviewUpdate();
 });
 preview.addEventListener("dragstart", (e) => e.preventDefault());
 
-saveBtn.addEventListener("click", async () => {
-  if (!state.imageId) return;
-  const confirmed = window.confirm(
-    "Save to project? This finalizes all edits and clears the undo history."
-  );
-  if (!confirmed) return;
+function closeExportDialog() {
+  exportDialog.hidden = true;
+}
 
-  setStatus("Saving...");
-  const res = await fetch(`/save/${state.imageId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!res.ok) {
-    setStatus("Save failed");
-    return;
-  }
-  const data = await res.json();
-  downloadBtn.href = data.download_url;
-  state.history = [];
-  state.currentStepId = null;
-  renderHistory();
-  setStatus(`Saved as ${data.filename}`);
+exportBtn.addEventListener("click", () => {
+  if (!state.imageId) return;
+  exportFileName.value = "edited-image";
+  exportFormat.value = "png";
+  updateExportOptionsVisibility();
+  exportDialog.hidden = false;
 });
 
-downloadBtn.addEventListener("click", (e) => {
-  e.preventDefault();
-  downloadCurrentImage();
+exportFormat.addEventListener("change", updateExportOptionsVisibility);
+exportTiffCompression.addEventListener("change", updateExportOptionsVisibility);
+
+// Keeps each export option range input's numeric readout in sync as it's dragged.
+["exportPngCompressLevel", "exportJpegQuality", "exportWebpQuality", "exportWebpMethod", "exportTiffQuality", "exportGifColors"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", (e) => {
+    document.querySelector(`[data-out="${id}"]`).textContent = e.target.value;
+  });
+});
+
+exportDialog.addEventListener("click", (event) => {
+  if (event.target === exportDialog) {
+    closeExportDialog();
+    return;
+  }
+  const mode = event.target.closest("[data-export-mode]")?.dataset.exportMode;
+  if (!mode) return;
+  const format = exportFormat.value;
+  const requestedName = exportFileName.value.trim() || "edited-image";
+  const ext = EXPORT_EXTENSIONS[format] || format;
+  const filename = requestedName.toLowerCase().endsWith(`.${ext}`) ? requestedName : `${requestedName}.${ext}`;
+  closeExportDialog();
+  if (mode !== "export") return;
+  exportCurrentImage(format, filename);
 });
 
 importHistoryBtn.addEventListener("click", () => {
@@ -853,6 +1274,7 @@ togglePanelBtn.addEventListener("click", () => {
     if (!state.imageId) return;
     fitPreviewToPane();
     if (state.zoom > 1) applyPreviewTransform();
+    else scheduleLivePreviewUpdate();
   });
 });
 
@@ -924,31 +1346,36 @@ function handleCropPointerMove(e) {
       return;
     }
 
+    // Resize only moves the dragged side; the opposite side stays put.
     const original = cropInteraction.rect;
     let x = original.x;
     let y = original.y;
     let w = original.w;
     let h = original.h;
 
-    if (cropInteraction.handle.includes("e")) w = Math.max(10, original.w + dx);
-    if (cropInteraction.handle.includes("s")) h = Math.max(10, original.h + dy);
-    if (cropInteraction.handle.includes("w")) {
+    // Strip the "handle-" prefix before checking direction letters — the
+    // word "handle" itself contains 'n' and 'e', which would otherwise
+    // match every handle regardless of its actual direction.
+    const direction = cropInteraction.handle.slice("handle-".length);
+    if (direction.includes("e")) w = Math.max(10, original.w + dx);
+    if (direction.includes("w")) {
       const newW = Math.max(10, original.w - dx);
       x = original.x + (original.w - newW);
       w = newW;
     }
-    if (cropInteraction.handle.includes("n")) {
+    if (direction.includes("s")) h = Math.max(10, original.h + dy);
+    if (direction.includes("n")) {
       const newH = Math.max(10, original.h - dy);
       y = original.y + (original.h - newH);
       h = newH;
     }
 
-    const clamped = normalizeRect({ x, y, w, h });
-    const maxW = rect.width - clamped.x;
-    const maxH = rect.height - clamped.y;
-    clamped.w = Math.min(clamped.w, maxW);
-    clamped.h = Math.min(clamped.h, maxH);
-    setCropBoxPosition(clamped.x, clamped.y, clamped.w, clamped.h);
+    x = Math.max(0, x);
+    y = Math.max(0, y);
+    w = Math.min(w, rect.width - x);
+    h = Math.min(h, rect.height - y);
+
+    setCropBoxPosition(x, y, w, h);
     return;
   }
 
@@ -1176,3 +1603,122 @@ enhancementStrength.addEventListener("input", () => {
   enhancementStrengthOutput.textContent = `${enhancementStrength.value}%`;
 });
 updateEnhancementStrengthVisibility();
+updateHueRangeVisual();
+
+grayscaleIntensity.addEventListener("input", () => {
+  document.querySelector('[data-out="grayscaleIntensity"]').textContent = parseFloat(grayscaleIntensity.value).toFixed(2);
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+grayscaleMethod.addEventListener("change", () => {
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+
+applyGrayscaleBtn.addEventListener("click", () => {
+  if (!state.imageId || !isGrayscalePending()) return;
+  const method = grayscaleMethod.value;
+  const intensity = parseFloat(grayscaleIntensity.value);
+  const methodLabel = grayscaleMethod.options[grayscaleMethod.selectedIndex].text;
+
+  commitStep(
+    { grayscale_method: method, grayscale_intensity: intensity },
+    `Grayscale (${methodLabel}, ${Math.round(intensity * 100)}%)`,
+    true
+  );
+
+  resetGrayscaleControls();
+  updatePanelButtons();
+});
+
+resetGrayscaleBtn.addEventListener("click", () => {
+  resetGrayscaleControls();
+  updatePanelButtons();
+  refreshLivePreviewOverlay();
+});
+
+filterIntensity.addEventListener("input", () => {
+  document.querySelector('[data-out="filterIntensity"]').textContent = parseFloat(filterIntensity.value).toFixed(2);
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+filterPreset.addEventListener("change", () => {
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+
+applyFilterBtn.addEventListener("click", () => {
+  if (!state.imageId || !isFiltersPending()) return;
+  const preset = filterPreset.value;
+  const intensity = parseFloat(filterIntensity.value);
+  const label = filterPreset.options[filterPreset.selectedIndex].text;
+
+  commitStep(
+    { filter_preset: preset, filter_intensity: intensity },
+    `${label} filter ${Math.round(intensity * 100)}%`,
+    true
+  );
+
+  resetFilterControls();
+  updatePanelButtons();
+});
+
+resetFilterBtn.addEventListener("click", () => {
+  resetFilterControls();
+  updatePanelButtons();
+  refreshLivePreviewOverlay();
+});
+
+isolationHueMin.addEventListener("input", () => {
+  if (parseFloat(isolationHueMin.value) > parseFloat(isolationHueMax.value)) {
+    isolationHueMax.value = isolationHueMin.value;
+    document.querySelector('[data-out="isolationHueMax"]').textContent = `${isolationHueMax.value}°`;
+  }
+  document.querySelector('[data-out="isolationHueMin"]').textContent = `${isolationHueMin.value}°`;
+  updateHueRangeVisual();
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+isolationHueMax.addEventListener("input", () => {
+  if (parseFloat(isolationHueMax.value) < parseFloat(isolationHueMin.value)) {
+    isolationHueMin.value = isolationHueMax.value;
+    document.querySelector('[data-out="isolationHueMin"]').textContent = `${isolationHueMin.value}°`;
+  }
+  document.querySelector('[data-out="isolationHueMax"]').textContent = `${isolationHueMax.value}°`;
+  updateHueRangeVisual();
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+isolationMinSaturation.addEventListener("input", () => {
+  document.querySelector('[data-out="isolationMinSaturation"]').textContent = parseFloat(isolationMinSaturation.value).toFixed(2);
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+isolationTone.addEventListener("input", () => {
+  document.querySelector('[data-out="isolationTone"]').textContent = parseFloat(isolationTone.value).toFixed(2);
+  updatePanelButtons();
+  scheduleLivePreviewUpdate();
+});
+
+applyIsolationBtn.addEventListener("click", () => {
+  if (!state.imageId || !isIsolationPending()) return;
+  const hueMin = parseFloat(isolationHueMin.value);
+  const hueMax = parseFloat(isolationHueMax.value);
+  const minSaturation = parseFloat(isolationMinSaturation.value);
+  const tone = parseFloat(isolationTone.value);
+
+  commitStep(
+    { isolation_hue_min: hueMin, isolation_hue_max: hueMax, isolation_min_saturation: minSaturation, isolation_tone: tone },
+    `Hue ${hueMin}°-${hueMax}° isolation (sat min ${minSaturation.toFixed(2)}, tone ${tone.toFixed(2)})`,
+    true
+  );
+
+  resetIsolationControls();
+  updatePanelButtons();
+});
+
+resetIsolationBtn.addEventListener("click", () => {
+  resetIsolationControls();
+  updatePanelButtons();
+  refreshLivePreviewOverlay();
+});

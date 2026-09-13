@@ -28,11 +28,24 @@ body {
   flex: 0 0 auto;
 }
 
-.topbar h1 { font-size: 12px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.topbar h1 { font-size: 12px; margin: 0; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
 .brand-logo { height: 18px; width: auto; display: block; }
 
-.topbar-actions { display: flex; gap: 6.4px; align-items: center; }
+.pending-changes-banner {
+  flex: 1 1 auto;
+  margin: 0 16px;
+  padding: 4px 10px;
+  font-size: 11.2px;
+  color: #f2c14e;
+  background: rgba(242, 193, 78, 0.12);
+  border: 1px solid rgba(242, 193, 78, 0.35);
+  border-radius: 4.8px;
+}
+
+.pending-changes-banner[hidden] { display: none; }
+
+.topbar-actions { display: flex; gap: 6.4px; align-items: center; margin-left: auto; flex: 0 0 auto; }
 
 /* Top toolbar controls at 80% of the base .btn/.icon-btn/.icon sizing. */
 .topbar-actions .btn {
@@ -172,6 +185,16 @@ body {
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
   margin: 0;
 }
+
+#previewCropOverlay {
+  position: absolute;
+  border-radius: 4px;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+#previewCropOverlay[hidden] { display: none; }
 
 .initial-preview-text {
   position: absolute;
@@ -338,6 +361,22 @@ body {
   overflow: hidden;
 }
 
+/* A panel with an unapplied (pending) change is lightened 4 steps above the
+   default rgba(255,255,255,0.02) background, in the same 0.02-per-step
+   increments used for that default, so it stands out from its neighbors. */
+.accordion-item.has-pending {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.pending-indicator {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.pending-indicator[hidden] { display: none; }
+
 .accordion-header {
   width: 100%;
   display: flex;
@@ -399,11 +438,110 @@ label.checkbox input { width: auto; margin-right: 6px; }
 
 .hint { font-size: 12px; color: var(--muted); margin-top: 0; }
 
+.hue-range-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.hue-range-label span { float: none; }
+.hue-range-values { color: var(--muted); }
+
+.hue-range {
+  position: relative;
+  height: 24px;
+  margin: 4px 0 12px;
+}
+
+.hue-range-track {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 8px;
+  transform: translateY(-50%);
+  border-radius: 4px;
+  background: linear-gradient(
+    to right,
+    hsl(0, 100%, 50%),
+    hsl(60, 100%, 50%),
+    hsl(120, 100%, 50%),
+    hsl(180, 100%, 50%),
+    hsl(240, 100%, 50%),
+    hsl(300, 100%, 50%),
+    hsl(360, 100%, 50%)
+  );
+  pointer-events: none;
+}
+
+.hue-range-selected {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  transform: translateY(-50%);
+  border-radius: 4px;
+  border: 2px solid #fff;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.hue-range-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: none;
+}
+
+.hue-range-input::-webkit-slider-runnable-track { background: transparent; }
+.hue-range-input::-moz-range-track { background: transparent; }
+
+.hue-range-input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: pointer;
+  margin-top: 5px;
+}
+
+.hue-range-input::-moz-range-thumb {
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: pointer;
+}
+
 fieldset .btn { width: 100%; margin-top: 6px; }
 
 .zoom-controls {
   display: flex;
   gap: 8px;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.panel-action-btn {
+  gap: 6px;
+  padding: 8px 14px;
+  line-height: normal;
 }
 
 .zoom-controls .btn,
@@ -526,6 +664,26 @@ fieldset .btn { width: 100%; margin-top: 6px; }
   background: #333644;
   color: var(--text);
 }
+
+.export-format-options {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.export-format-options[hidden] { display: none; }
+
+.export-format-options .history-import-field:last-child { margin-bottom: 0; }
+
+.ico-size-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px 12px;
+}
+
+.ico-size-options label.checkbox { margin-top: 4px; }
 
 .history-dialog-actions {
   display: grid;

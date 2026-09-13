@@ -9,6 +9,7 @@
 <body>
 <header class="topbar">
   <h1><img src="{{ url_for('static', filename='zjournal_logo.png') }}" alt="Zrugal" class="brand-logo"> Photo Editor</h1>
+  <p id="pendingChangesBanner" class="pending-changes-banner" role="status" hidden></p>
   <div class="topbar-actions">
     <label class="btn icon-btn secondary" for="fileInput" title="Upload photo" aria-label="Upload photo">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 8 12 3 17 8"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
@@ -19,14 +20,10 @@
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
       <span class="btn-label">Reset</span>
     </button>
-    <button id="saveBtn" class="btn icon-btn primary" title="Save to project" aria-label="Save to project" disabled>
-      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>
-      <span class="btn-label">Save</span>
-    </button>
-    <a id="downloadBtn" class="btn icon-btn" href="#" hidden title="Download" aria-label="Download">
+    <button id="exportBtn" class="btn icon-btn primary" title="Export image" aria-label="Export image" disabled>
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-      <span class="btn-label">Download</span>
-    </a>
+      <span class="btn-label">Export</span>
+    </button>
     <button id="togglePanelBtn" class="btn icon-btn secondary" type="button" title="Hide adjustments panel" aria-label="Hide adjustments panel" aria-pressed="false">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="m11 9-3 3 3 3"/></svg>
       <span id="togglePanelLabel" class="btn-label">Hide panel</span>
@@ -39,6 +36,7 @@
     <div id="dropHint" class="drop-hint">Upload a photo to get started</div>
     <div id="imageWrap" class="image-wrap" hidden>
       <img id="preview" alt="preview" hidden>
+      <img id="previewCropOverlay" alt="" hidden>
       <span id="initialPreviewText" class="initial-preview-text" hidden>Upload an Image to get started</span>
       <div id="cropBox" class="crop-box" hidden>
         <span class="crop-handle handle-nw"></span>
@@ -63,72 +61,6 @@
 
   <aside class="panel">
     <div class="accordion">
-      <div class="accordion-item">
-        <button class="accordion-header" type="button" aria-expanded="true">
-          <span class="accordion-title">
-            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-            Light
-          </span>
-          <span class="chevron">▾</span>
-        </button>
-        <div class="accordion-body">
-          <label>Brightness <span data-out="brightness">1.00</span>
-            <input type="range" id="brightness" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Exposure <span data-out="exposure">1.00</span>
-            <input type="range" id="exposure" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Contrast <span data-out="contrast">1.00</span>
-            <input type="range" id="contrast" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Whites <span data-out="whites">1.00</span>
-            <input type="range" id="whites" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Blacks <span data-out="blacks">1.00</span>
-            <input type="range" id="blacks" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Shadows <span data-out="shadows">1.00</span>
-            <input type="range" id="shadows" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-        </div>
-      </div>
-
-      <div class="accordion-item">
-        <button class="accordion-header" type="button" aria-expanded="true">
-          <span class="accordion-title">
-            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.69 18 9a8 8 0 1 1-12 0z"/></svg>
-            Color
-          </span>
-          <span class="chevron">▾</span>
-        </button>
-        <div class="accordion-body">
-          <label>Saturation <span data-out="saturation">1.00</span>
-            <input type="range" id="saturation" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Vibrance <span data-out="vibrance">1.00</span>
-            <input type="range" id="vibrance" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Warmth <span data-out="warmth">0.00</span>
-            <input type="range" id="warmth" min="-1" max="1" step="0.01" value="0" disabled>
-          </label>
-          <label>Pop <span data-out="pop">1.00</span>
-            <input type="range" id="pop" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Vignette <span data-out="vignette">0.00</span>
-            <input type="range" id="vignette" min="0" max="1" step="0.01" value="0" disabled>
-          </label>
-          <label>Red <span data-out="r">1.00</span>
-            <input type="range" id="r" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Green <span data-out="g">1.00</span>
-            <input type="range" id="g" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-          <label>Blue channel <span data-out="b">1.00</span>
-            <input type="range" id="b" min="0" max="2" step="0.01" value="1" disabled>
-          </label>
-        </div>
-      </div>
-
       <div class="accordion-item open">
         <button class="accordion-header" type="button" aria-expanded="true">
           <span class="accordion-title">
@@ -178,6 +110,216 @@
           <button id="clearCropBtn" class="btn icon-btn secondary" title="Clear crop" aria-label="Clear crop" disabled>
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
+        </div>
+      </div>
+
+      <div class="accordion-item" id="lightPanelItem">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            Light
+            <span id="lightPendingIndicator" class="pending-indicator" title="Unapplied changes" hidden>*</span>
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label>Brightness <span data-out="brightness">1.00</span>
+            <input type="range" id="brightness" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Exposure <span data-out="exposure">1.00</span>
+            <input type="range" id="exposure" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Contrast <span data-out="contrast">1.00</span>
+            <input type="range" id="contrast" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Alpha (gain) <span data-out="alpha">1.00</span>
+            <input type="range" id="alpha" min="0" max="3" step="0.01" value="1" disabled>
+          </label>
+          <label>Beta (bias) <span data-out="beta">0.00</span>
+            <input type="range" id="beta" min="-100" max="100" step="1" value="0" disabled>
+          </label>
+          <label>Gamma <span data-out="gamma">1.00</span>
+            <input type="range" id="gamma" min="0.1" max="3" step="0.01" value="1" disabled>
+          </label>
+          <label>Whites <span data-out="whites">1.00</span>
+            <input type="range" id="whites" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Blacks <span data-out="blacks">1.00</span>
+            <input type="range" id="blacks" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Shadows <span data-out="shadows">1.00</span>
+            <input type="range" id="shadows" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <div class="panel-actions">
+            <button id="applyLightBtn" class="btn icon-btn secondary panel-action-btn" title="Apply light adjustments" aria-label="Apply light adjustments" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <span class="btn-label">Apply</span>
+            </button>
+            <button id="resetLightBtn" class="btn icon-btn secondary panel-action-btn" title="Reset light adjustments" aria-label="Reset light adjustments" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
+              <span class="btn-label">Reset</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item" id="colorPanelItem">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.69 18 9a8 8 0 1 1-12 0z"/></svg>
+            Color
+            <span id="colorPendingIndicator" class="pending-indicator" title="Unapplied changes" hidden>*</span>
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label>Saturation <span data-out="saturation">1.00</span>
+            <input type="range" id="saturation" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Vibrance <span data-out="vibrance">1.00</span>
+            <input type="range" id="vibrance" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Warmth <span data-out="warmth">0.00</span>
+            <input type="range" id="warmth" min="-1" max="1" step="0.01" value="0" disabled>
+          </label>
+          <label>Pop <span data-out="pop">1.00</span>
+            <input type="range" id="pop" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Vignette <span data-out="vignette">0.00</span>
+            <input type="range" id="vignette" min="0" max="1" step="0.01" value="0" disabled>
+          </label>
+          <label>Red <span data-out="r">1.00</span>
+            <input type="range" id="r" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Green <span data-out="g">1.00</span>
+            <input type="range" id="g" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <label>Blue channel <span data-out="b">1.00</span>
+            <input type="range" id="b" min="0" max="2" step="0.01" value="1" disabled>
+          </label>
+          <div class="panel-actions">
+            <button id="applyColorBtn" class="btn icon-btn secondary panel-action-btn" title="Apply color adjustments" aria-label="Apply color adjustments" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <span class="btn-label">Apply</span>
+            </button>
+            <button id="resetColorBtn" class="btn icon-btn secondary panel-action-btn" title="Reset color adjustments" aria-label="Reset color adjustments" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
+              <span class="btn-label">Reset</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item" id="grayscalePanelItem">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg>
+            Grayscale
+            <span id="grayscalePendingIndicator" class="pending-indicator" title="Unapplied changes" hidden>*</span>
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label>Method
+            <select id="grayscaleMethod" disabled>
+              <option value="luminosity" selected>Luminosity</option>
+              <option value="average">Average</option>
+              <option value="red">Red channel</option>
+              <option value="green">Green channel</option>
+              <option value="blue">Blue channel</option>
+            </select>
+          </label>
+          <label>Intensity <span data-out="grayscaleIntensity">0.00</span>
+            <input type="range" id="grayscaleIntensity" min="0" max="1" step="0.01" value="0" disabled>
+          </label>
+          <div class="panel-actions">
+            <button id="applyGrayscaleBtn" class="btn icon-btn secondary panel-action-btn" title="Apply grayscale" aria-label="Apply grayscale" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <span class="btn-label">Apply</span>
+            </button>
+            <button id="resetGrayscaleBtn" class="btn icon-btn secondary panel-action-btn" title="Reset grayscale" aria-label="Reset grayscale" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
+              <span class="btn-label">Reset</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item" id="filtersPanelItem">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            Filters
+            <span id="filtersPendingIndicator" class="pending-indicator" title="Unapplied changes" hidden>*</span>
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label>Filter
+            <select id="filterPreset" disabled>
+              <option value="none" selected>None</option>
+              <option value="sepia">Sepia</option>
+              <option value="vintage">Vintage</option>
+              <option value="noir">Noir</option>
+              <option value="vivid">Vivid</option>
+              <option value="cool">Cool</option>
+              <option value="warm">Warm</option>
+              <option value="fade">Fade</option>
+            </select>
+          </label>
+          <label>Intensity <span data-out="filterIntensity">1.00</span>
+            <input type="range" id="filterIntensity" min="0" max="1" step="0.01" value="1" disabled>
+          </label>
+          <div class="panel-actions">
+            <button id="applyFilterBtn" class="btn icon-btn secondary panel-action-btn" title="Apply filter" aria-label="Apply filter" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <span class="btn-label">Apply</span>
+            </button>
+            <button id="resetFilterBtn" class="btn icon-btn secondary panel-action-btn" title="Reset filter" aria-label="Reset filter" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
+              <span class="btn-label">Reset</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item" id="isolationPanelItem">
+        <button class="accordion-header" type="button" aria-expanded="true">
+          <span class="accordion-title">
+            <svg class="icon accordion-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+            Color Isolation
+            <span id="isolationPendingIndicator" class="pending-indicator" title="Unapplied changes" hidden>*</span>
+          </span>
+          <span class="chevron">▾</span>
+        </button>
+        <div class="accordion-body">
+          <label class="hue-range-label">
+            <span>Hue range</span>
+            <span class="hue-range-values"><span data-out="isolationHueMin">0&deg;</span>&ndash;<span data-out="isolationHueMax">360&deg;</span></span>
+          </label>
+          <div class="hue-range">
+            <div class="hue-range-track"></div>
+            <div id="hueRangeSelected" class="hue-range-selected"></div>
+            <input type="range" id="isolationHueMin" class="hue-range-input" min="0" max="360" step="1" value="0" disabled>
+            <input type="range" id="isolationHueMax" class="hue-range-input" min="0" max="360" step="1" value="360" disabled>
+          </div>
+          <label>Min saturation <span data-out="isolationMinSaturation">0.00</span>
+            <input type="range" id="isolationMinSaturation" min="0" max="1" step="0.01" value="0" disabled>
+          </label>
+          <label>Tone (black &harr; white) <span data-out="isolationTone">0.00</span>
+            <input type="range" id="isolationTone" min="0" max="1" step="0.01" value="0" disabled>
+          </label>
+          <p class="hint">Pixels whose hue falls inside the selected range (and meet the minimum saturation) keep their original color; everything else is filled with the tone below (0 = black, 1 = white).</p>
+          <div class="panel-actions">
+            <button id="applyIsolationBtn" class="btn icon-btn secondary panel-action-btn" title="Apply color isolation" aria-label="Apply color isolation" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <span class="btn-label">Apply</span>
+            </button>
+            <button id="resetIsolationBtn" class="btn icon-btn secondary panel-action-btn" title="Reset color isolation" aria-label="Reset color isolation" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 3 3 9 9 9"/><path d="M3 9a9 9 0 1 1 2.6 8.4"/></svg>
+              <span class="btn-label">Reset</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -315,6 +457,104 @@
     <div class="history-dialog-actions">
       <button type="button" data-history-mode="export" class="btn primary">Export settings</button>
       <button type="button" data-history-mode="cancel" class="btn secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="exportDialog" class="history-dialog" hidden>
+  <div class="history-dialog-card" role="dialog" aria-modal="true" aria-labelledby="exportDialogTitle">
+    <h2 id="exportDialogTitle">Export image</h2>
+    <label class="history-import-field">File name
+      <input type="text" id="exportFileName" value="edited-image">
+    </label>
+    <label class="history-import-field">Format
+      <select id="exportFormat">
+        <option value="png" selected>PNG</option>
+        <option value="jpeg">JPEG</option>
+        <option value="webp">WebP</option>
+        <option value="tiff">TIFF</option>
+        <option value="bmp">BMP</option>
+        <option value="gif">GIF</option>
+        <option value="ico">ICO</option>
+      </select>
+    </label>
+
+    <div id="exportOptionsPng" class="export-format-options" data-export-options="png">
+      <label class="history-import-field">Compression level (0=fastest, 9=smallest) <span data-out="exportPngCompressLevel">6</span>
+        <input type="range" id="exportPngCompressLevel" min="0" max="9" step="1" value="6">
+      </label>
+      <label class="checkbox"><input type="checkbox" id="exportPngOptimize"> Optimize (slower, smaller file)</label>
+    </div>
+
+    <div id="exportOptionsJpeg" class="export-format-options" data-export-options="jpeg" hidden>
+      <label class="history-import-field">Quality <span data-out="exportJpegQuality">95</span>
+        <input type="range" id="exportJpegQuality" min="1" max="100" step="1" value="95">
+      </label>
+      <label class="history-import-field">Chroma subsampling
+        <select id="exportJpegSubsampling">
+          <option value="keep" selected>Auto</option>
+          <option value="4:4:4">4:4:4 (best quality)</option>
+          <option value="4:2:2">4:2:2</option>
+          <option value="4:2:0">4:2:0 (smallest file)</option>
+        </select>
+      </label>
+      <label class="checkbox"><input type="checkbox" id="exportJpegProgressive"> Progressive</label>
+      <label class="checkbox"><input type="checkbox" id="exportJpegOptimize"> Optimize (slower, smaller file)</label>
+    </div>
+
+    <div id="exportOptionsWebp" class="export-format-options" data-export-options="webp" hidden>
+      <label class="checkbox"><input type="checkbox" id="exportWebpLossless"> Lossless</label>
+      <label class="history-import-field">Quality <span data-out="exportWebpQuality">90</span>
+        <input type="range" id="exportWebpQuality" min="0" max="100" step="1" value="90">
+      </label>
+      <label class="history-import-field">Compression method (0=fastest, 6=smallest) <span data-out="exportWebpMethod">4</span>
+        <input type="range" id="exportWebpMethod" min="0" max="6" step="1" value="4">
+      </label>
+    </div>
+
+    <div id="exportOptionsTiff" class="export-format-options" data-export-options="tiff" hidden>
+      <label class="history-import-field">Compression
+        <select id="exportTiffCompression">
+          <option value="tiff_adobe_deflate" selected>ZIP (Deflate)</option>
+          <option value="tiff_lzw">LZW</option>
+          <option value="packbits">PackBits</option>
+          <option value="lzma">LZMA</option>
+          <option value="jpeg">JPEG (lossy)</option>
+          <option value="none">None (uncompressed)</option>
+        </select>
+      </label>
+      <label class="history-import-field" id="exportTiffQualityField" hidden>JPEG quality <span data-out="exportTiffQuality">90</span>
+        <input type="range" id="exportTiffQuality" min="1" max="100" step="1" value="90">
+      </label>
+    </div>
+
+    <div id="exportOptionsGif" class="export-format-options" data-export-options="gif" hidden>
+      <label class="history-import-field">Palette colors <span data-out="exportGifColors">256</span>
+        <input type="range" id="exportGifColors" min="2" max="256" step="1" value="256">
+      </label>
+      <label class="checkbox"><input type="checkbox" id="exportGifOptimize" checked> Optimize palette/frames</label>
+    </div>
+
+    <div id="exportOptionsBmp" class="export-format-options" data-export-options="bmp" hidden>
+      <p class="hint">BMP is stored uncompressed; there are no compression settings for this format.</p>
+    </div>
+
+    <div id="exportOptionsIco" class="export-format-options" data-export-options="ico" hidden>
+      <label class="history-import-field">Icon sizes to embed</label>
+      <div class="ico-size-options">
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="16" checked> 16&times;16</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="24"> 24&times;24</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="32" checked> 32&times;32</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="48" checked> 48&times;48</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="64"> 64&times;64</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="128"> 128&times;128</label>
+        <label class="checkbox"><input type="checkbox" class="exportIcoSize" value="256" checked> 256&times;256</label>
+      </div>
+    </div>
+
+    <div class="history-dialog-actions">
+      <button type="button" data-export-mode="export" class="btn primary">Export</button>
+      <button type="button" data-export-mode="cancel" class="btn secondary">Cancel</button>
     </div>
   </div>
 </div>

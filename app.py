@@ -3,6 +3,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import threading
 import time
 import urllib.request
@@ -22,14 +23,35 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 Image.MAX_IMAGE_PIXELS = None
 
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-SAVED_DIR = BASE_DIR / "saved"
-STEPS_DIR = BASE_DIR / "steps"
+
+
+def _user_data_dir() -> Path:
+    """Where user data (uploads, saved images, edit history, downloaded
+    model weights) lives. A normal checkout keeps this next to app.py like
+    before. A single-file frozen executable (PyInstaller --onefile)
+    extracts BASE_DIR fresh into a temp folder on every launch and wipes
+    it on exit, so user data there would vanish between runs -- it needs
+    an OS-appropriate persistent location instead."""
+    if not getattr(sys, "frozen", False):
+        return BASE_DIR
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    elif sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", Path.home()))
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return root / "ZPhotoEditor"
+
+
+DATA_DIR = _user_data_dir()
+UPLOAD_DIR = DATA_DIR / "uploads"
+SAVED_DIR = DATA_DIR / "saved"
+STEPS_DIR = DATA_DIR / "steps"
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp"}
 
-UPLOAD_DIR.mkdir(exist_ok=True)
-SAVED_DIR.mkdir(exist_ok=True)
-STEPS_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+SAVED_DIR.mkdir(parents=True, exist_ok=True)
+STEPS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 # High-resolution photos (e.g. 8000px+ PNG/TIFF exports) can comfortably exceed
@@ -202,6 +224,33 @@ def apply_exposure(img: Image.Image, exposure: float) -> Image.Image:
     return img.point(lambda p: max(0, min(255, int(p * exposure))))
 
 
+def _apply_color_lut(img: Image.Image, lut: list) -> Image.Image:
+    # img.point() needs one 256-entry table per band; apply the curve to color
+    # bands only and leave alpha (if any) untouched.
+    color_bands = min(len(img.getbands()), 3)
+    identity = list(range(256))
+    full_lut = lut * color_bands + identity * (len(img.getbands()) - color_bands)
+    return img.point(full_lut)
+
+
+def apply_alpha_beta(img: Image.Image, alpha: float, beta: float) -> Image.Image:
+    """Classic OpenCV-style linear correction: output = alpha * input + beta,
+    where alpha is the gain (contrast-like) and beta is the bias (brightness-like)."""
+    if alpha == 1.0 and beta == 0.0:
+        return img
+    lut = [max(0, min(255, int(round(i * alpha + beta)))) for i in range(256)]
+    return _apply_color_lut(img, lut)
+
+
+def apply_gamma(img: Image.Image, gamma: float) -> Image.Image:
+    """Power-law (gamma) correction: output = 255 * (input / 255) ** (1 / gamma)."""
+    if gamma == 1.0:
+        return img
+    inv_gamma = 1.0 / gamma
+    lut = [max(0, min(255, int(round(((i / 255.0) ** inv_gamma) * 255)))) for i in range(256)]
+    return _apply_color_lut(img, lut)
+
+
 # Per-tone-region weight curves (index = input 0-255 level), used to make
 # whites/blacks/shadows push a targeted part of the tonal range rather than
 # every pixel uniformly.
@@ -214,12 +263,69 @@ def apply_tone_region(img: Image.Image, amount: float, weights: list) -> Image.I
     if amount == 0:
         return img
     lut = [max(0, min(255, int(round(i + amount * 255 * weights[i])))) for i in range(256)]
-    # img.point() needs one 256-entry table per band; apply the curve to color
-    # bands only and leave alpha (if any) untouched.
-    color_bands = min(len(img.getbands()), 3)
-    identity = list(range(256))
-    full_lut = lut * color_bands + identity * (len(img.getbands()) - color_bands)
-    return img.point(full_lut)
+    return _apply_color_lut(img, lut)
+
+
+GRAYSCALE_CHANNEL_INDEX = {"red": 0, "green": 1, "blue": 2}
+
+
+def apply_grayscale(img: Image.Image, method: str, intensity: float) -> Image.Image:
+    """Convert to grayscale using the given method, then blend back toward the
+    original by (1 - intensity) so partial desaturation is possible."""
+    intensity = max(0.0, min(1.0, intensity))
+    if intensity <= 0:
+        return img
+
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = img.convert("RGB") if img.mode != "RGB" else img
+
+    if method == "average":
+        arr = np.array(base, dtype=np.float32).mean(axis=2, keepdims=True)
+        channel = Image.fromarray(np.uint8(np.clip(arr, 0, 255)).squeeze(axis=2))
+    elif method in GRAYSCALE_CHANNEL_INDEX:
+        channel = base.split()[GRAYSCALE_CHANNEL_INDEX[method]]
+    else:  # luminosity (default): ITU-R 601-2 perceptual weighting
+        channel = base.convert("L")
+
+    gray = Image.merge("RGB", (channel, channel, channel))
+    result = Image.blend(base, gray, intensity)
+    if alpha is not None:
+        result = result.convert("RGBA")
+        result.putalpha(alpha)
+    return result
+
+
+def apply_color_isolation(
+    img: Image.Image, hue_min: float, hue_max: float, min_saturation: float, tone: float
+) -> Image.Image:
+    """Keep pixels whose hue falls within [hue_min, hue_max] degrees (and whose
+    saturation is at least `min_saturation`) in their original color; replace
+    every other pixel with a flat black/gray/white fill. Low-saturation pixels
+    have an unreliable/near-meaningless hue, so `min_saturation` (0-1) lets
+    near-gray pixels be excluded even if their noisy hue lands in range.
+    `tone` (0=black - 1=white) sets the fill for excluded pixels."""
+    hue_min = max(0.0, min(360.0, hue_min))
+    hue_max = max(0.0, min(360.0, hue_max))
+    if hue_min > hue_max:
+        hue_min, hue_max = hue_max, hue_min
+    min_saturation = max(0.0, min(1.0, min_saturation))
+    tone = max(0.0, min(1.0, tone))
+
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = img.convert("RGB") if img.mode != "RGB" else img
+    h_channel, s_channel, _ = base.convert("HSV").split()
+    hue_deg = np.array(h_channel, dtype=np.float32) * (360.0 / 255.0)
+    saturation = np.array(s_channel, dtype=np.float32) / 255.0
+    mask = (hue_deg >= hue_min) & (hue_deg <= hue_max) & (saturation >= min_saturation)
+
+    arr = np.array(base, dtype=np.float32)
+    fill = np.full_like(arr, tone * 255.0)
+    result_arr = np.where(mask[..., None], arr, fill)
+    result = Image.fromarray(np.uint8(np.clip(result_arr, 0, 255)))
+    if alpha is not None:
+        result = result.convert("RGBA")
+        result.putalpha(alpha)
+    return result
 
 
 def apply_vibrance(img: Image.Image, amount: float) -> Image.Image:
@@ -238,6 +344,71 @@ def apply_vibrance(img: Image.Image, amount: float) -> Image.Image:
         result = result.convert("RGBA")
         result.putalpha(img.split()[3])
     return result
+
+
+# Standard sepia color matrix (each output channel is a fixed weighted mix of
+# the input R/G/B), applied as a matrix multiply rather than composed from the
+# warmth/tone sliders since it's a well-known, specific transform.
+SEPIA_MATRIX = np.array([
+    [0.393, 0.769, 0.189],
+    [0.349, 0.686, 0.168],
+    [0.272, 0.534, 0.131],
+], dtype=np.float32)
+
+
+def apply_sepia(img: Image.Image, intensity: float) -> Image.Image:
+    if intensity <= 0:
+        return img
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    base = img.convert("RGB") if img.mode != "RGB" else img
+    arr = np.array(base, dtype=np.float32)
+    sepia_arr = np.clip(arr @ SEPIA_MATRIX.T, 0, 255)
+    sepia = Image.fromarray(np.uint8(sepia_arr))
+    result = Image.blend(base, sepia, intensity)
+    if alpha is not None:
+        result = result.convert("RGBA")
+        result.putalpha(alpha)
+    return result
+
+
+# Each preset's "full strength" (intensity 1.0) recipe, expressed in the same
+# units as the sliders they reuse: multiplicative factors (1.0 = neutral) for
+# contrast/saturation/vibrance, additive amounts (0 = neutral) for warmth and
+# vignette, and a 0-1 blend amount for grayscale.
+FILTER_PRESETS = {
+    "vintage": {"contrast": 0.85, "saturation": 0.7, "warmth": 0.3, "vignette": 0.35},
+    "noir": {"grayscale": 1.0, "contrast": 1.3, "vignette": 0.4},
+    "vivid": {"saturation": 1.5, "vibrance": 1.3, "contrast": 1.15},
+    "cool": {"warmth": -0.35, "saturation": 1.05},
+    "warm": {"warmth": 0.35, "saturation": 1.05},
+    "fade": {"contrast": 0.75, "saturation": 0.85},
+}
+
+
+def apply_filter_preset(img: Image.Image, preset: str, intensity: float) -> Image.Image:
+    intensity = max(0.0, min(1.0, intensity))
+    if intensity <= 0:
+        return img
+    if preset == "sepia":
+        return apply_sepia(img, intensity)
+
+    recipe = FILTER_PRESETS.get(preset)
+    if not recipe:
+        return img
+
+    if "grayscale" in recipe:
+        img = apply_grayscale(img, "luminosity", recipe["grayscale"] * intensity)
+    if "saturation" in recipe:
+        img = ImageEnhance.Color(img).enhance(1.0 + (recipe["saturation"] - 1.0) * intensity)
+    if "vibrance" in recipe:
+        img = apply_vibrance(img, (recipe["vibrance"] - 1.0) * intensity)
+    if "warmth" in recipe:
+        img = apply_warmth(img, recipe["warmth"] * intensity)
+    if "contrast" in recipe:
+        img = ImageEnhance.Contrast(img).enhance(1.0 + (recipe["contrast"] - 1.0) * intensity)
+    if "vignette" in recipe:
+        img = apply_vignette(img, recipe["vignette"] * intensity)
+    return img
 
 
 def normalize_orientation(img: Image.Image) -> Image.Image:
@@ -290,15 +461,22 @@ def get_realesrgan_upsampler():
             raise RuntimeError(f"Real-ESRGAN dependency import failed: {exc}") from exc
 
         model_path = Path(
-            os.environ.get("REALESRGAN_MODEL_PATH", BASE_DIR / "models" / "RealESRGAN_x4plus.pth")
+            os.environ.get("REALESRGAN_MODEL_PATH", DATA_DIR / "models" / "RealESRGAN_x4plus.pth")
         )
         if not model_path.exists():
             model_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                urllib.request.urlretrieve(REALESRGAN_MODEL_URL, model_path)
-            except OSError as exc:
-                model_path.unlink(missing_ok=True)
-                raise RuntimeError(f"Could not download Real-ESRGAN weights: {exc}") from exc
+            # A frozen build bundles the weights alongside the rest of the
+            # app (see desktop/build.py); seed the persistent copy from
+            # there once instead of hitting the network on every install.
+            bundled_path = BASE_DIR / "models" / "RealESRGAN_x4plus.pth"
+            if getattr(sys, "frozen", False) and bundled_path.exists():
+                shutil.copyfile(bundled_path, model_path)
+            else:
+                try:
+                    urllib.request.urlretrieve(REALESRGAN_MODEL_URL, model_path)
+                except OSError as exc:
+                    model_path.unlink(missing_ok=True)
+                    raise RuntimeError(f"Could not download Real-ESRGAN weights: {exc}") from exc
 
         model = RRDBNet(
             num_in_ch=3,
@@ -539,6 +717,18 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     img = normalize_orientation(img)
     img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
 
+    # Live-preview-only viewport crop (distinct from `crop`, which permanently
+    # crops the source on commit): restricts adjustment/filter processing to
+    # whatever's currently visible on screen so dragging a slider stays fast
+    # regardless of the source image's actual resolution.
+    preview_crop = params.get("preview_crop")
+    if preview_crop and preview_crop.get("w") and preview_crop.get("h"):
+        x = max(0, min(int(preview_crop["x"]), img.width - 1))
+        y = max(0, min(int(preview_crop["y"]), img.height - 1))
+        w = max(1, min(int(preview_crop["w"]), img.width - x))
+        h = max(1, min(int(preview_crop["h"]), img.height - y))
+        img = img.crop((x, y, x + w, y + h))
+
     rotation = int(float(params.get("rotation", 0) or 0)) % 360
     if rotation:
         img = img.rotate(-rotation, expand=True)
@@ -583,6 +773,9 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
     r = float(params.get("r", 1.0))
     g = float(params.get("g", 1.0))
     b = float(params.get("b", 1.0))
+    alpha = float(params.get("alpha", 1.0))
+    beta = float(params.get("beta", 0.0))
+    gamma = float(params.get("gamma", 1.0))
 
     if brightness != 1.0:
         img = ImageEnhance.Brightness(img).enhance(brightness)
@@ -590,6 +783,10 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         img = apply_exposure(img, exposure)
     if contrast != 1.0:
         img = ImageEnhance.Contrast(img).enhance(contrast)
+    if alpha != 1.0 or beta != 0.0:
+        img = apply_alpha_beta(img, alpha, beta)
+    if gamma != 1.0:
+        img = apply_gamma(img, gamma)
     img = apply_tone_region(img, whites - 1.0, WHITES_WEIGHTS)
     img = apply_tone_region(img, blacks - 1.0, BLACKS_WEIGHTS)
     img = apply_tone_region(img, shadows - 1.0, SHADOWS_WEIGHTS)
@@ -602,6 +799,21 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         img = ImageEnhance.Color(img).enhance(1 + (pop - 1) * 0.35)
     img = apply_channel_balance(img, r, g, b)
     img = apply_vignette(img, vignette)
+
+    grayscale_method = str(params.get("grayscale_method", "luminosity"))
+    grayscale_intensity = float(params.get("grayscale_intensity", 0.0))
+    img = apply_grayscale(img, grayscale_method, grayscale_intensity)
+
+    filter_preset = params.get("filter_preset")
+    if filter_preset and filter_preset != "none":
+        img = apply_filter_preset(img, filter_preset, float(params.get("filter_intensity", 1.0)))
+
+    isolation_hue_min = float(params.get("isolation_hue_min", 0.0))
+    isolation_hue_max = float(params.get("isolation_hue_max", 360.0))
+    if isolation_hue_min > 0.0 or isolation_hue_max < 360.0:
+        isolation_min_saturation = float(params.get("isolation_min_saturation", 0.0))
+        isolation_tone = float(params.get("isolation_tone", 0.0))
+        img = apply_color_isolation(img, isolation_hue_min, isolation_hue_max, isolation_min_saturation, isolation_tone)
 
     preview = params.get("preview")
     if preview and preview.get("w") and preview.get("h"):
@@ -731,6 +943,7 @@ def commit(image_id):
     params = request.get_json(force=True) or {}
     label = params.pop("label", "Edit")
     params.pop("preview", None)  # never bake the preview downscale into a step
+    params.pop("preview_crop", None)  # never bake the live-preview viewport crop into a step
 
     try:
         img = process_image_object(current_source_image(image_id), params)
@@ -1024,27 +1237,103 @@ def import_history(image_id):
     )
 
 
-@app.route("/save/<image_id>", methods=["POST"])
-def save(image_id):
-    old_original = original_path(image_id)
-    new_original = UPLOAD_DIR / f"{image_id}_original.png"
+EXPORT_FORMATS = {
+    "png": {"pillow_format": "PNG", "mimetype": "image/png", "ext": "png"},
+    "jpeg": {"pillow_format": "JPEG", "mimetype": "image/jpeg", "ext": "jpg"},
+    "webp": {"pillow_format": "WEBP", "mimetype": "image/webp", "ext": "webp"},
+    "tiff": {"pillow_format": "TIFF", "mimetype": "image/tiff", "ext": "tiff"},
+    "bmp": {"pillow_format": "BMP", "mimetype": "image/bmp", "ext": "bmp"},
+    "gif": {"pillow_format": "GIF", "mimetype": "image/gif", "ext": "gif"},
+    "ico": {"pillow_format": "ICO", "mimetype": "image/x-icon", "ext": "ico"},
+}
 
-    with current_source_image(image_id) as img:
-        img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
-        saved_name = f"{image_id}.png"
-        img.save(SAVED_DIR / saved_name, format="PNG")
-        img.save(new_original, format="PNG")
-        # new_original now holds exactly this image, so seed the cache for the
-        # post-save (empty-history) state instead of leaving it stale.
-        _SOURCE_CACHE[image_id] = ((), img.copy())
+# TIFF codecs that Pillow can write for any image mode (CCITT/Group3/Group4
+# are bilevel-only, so they're left out here).
+TIFF_COMPRESSIONS = {"none", "tiff_lzw", "tiff_adobe_deflate", "packbits", "jpeg", "lzma"}
+JPEG_SUBSAMPLING = {"4:4:4": 0, "4:2:2": 1, "4:2:0": 2, "keep": "keep"}
+ICO_DEFAULT_SIZES = [16, 24, 32, 48, 64, 128, 256]
 
-    if old_original != new_original:
-        old_original.unlink(missing_ok=True)
 
-    HISTORY[image_id] = []
-    ACTIVE_HISTORY_COUNT[image_id] = 0
+def _clamp_num(value, lo, hi, default):
+    try:
+        return max(lo, min(hi, type(default)(value)))
+    except (TypeError, ValueError):
+        return default
 
-    return jsonify(saved=True, filename=saved_name, download_url=f"/download/{saved_name}")
+
+def _prepare_export(img: Image.Image, fmt_key: str, options: dict) -> tuple[Image.Image, dict]:
+    """Applies the format-specific compression/quality options to `img`,
+    returning the (possibly mode-converted) image and the Pillow save kwargs."""
+    save_kwargs = {}
+    if fmt_key == "png":
+        save_kwargs["optimize"] = bool(options.get("optimize", False))
+        save_kwargs["compress_level"] = _clamp_num(options.get("compress_level", 6), 0, 9, 6)
+    elif fmt_key == "jpeg":
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        save_kwargs["quality"] = _clamp_num(options.get("quality", 95), 1, 100, 95)
+        save_kwargs["optimize"] = bool(options.get("optimize", False))
+        save_kwargs["progressive"] = bool(options.get("progressive", False))
+        # "keep" only works when the source image's own format is JPEG, which
+        # is never true here since `img` comes from the processing pipeline —
+        # so "Auto" just omits the kwarg and lets Pillow pick its own default.
+        subsampling = JPEG_SUBSAMPLING.get(options.get("subsampling"), None)
+        if subsampling is not None and subsampling != "keep":
+            save_kwargs["subsampling"] = subsampling
+    elif fmt_key == "webp":
+        save_kwargs["lossless"] = bool(options.get("lossless", False))
+        save_kwargs["quality"] = _clamp_num(options.get("quality", 90), 0, 100, 90)
+        save_kwargs["method"] = _clamp_num(options.get("method", 4), 0, 6, 4)
+    elif fmt_key == "tiff":
+        compression = options.get("compression", "tiff_adobe_deflate")
+        if compression not in TIFF_COMPRESSIONS:
+            compression = "tiff_adobe_deflate"
+        if compression == "jpeg" and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        if compression != "none":
+            save_kwargs["compression"] = compression
+        if compression == "jpeg":
+            save_kwargs["quality"] = _clamp_num(options.get("quality", 90), 1, 100, 90)
+    elif fmt_key == "bmp":
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+    elif fmt_key == "gif":
+        colors = _clamp_num(options.get("colors", 256), 2, 256, 256)
+        rgb = img.convert("RGB") if img.mode != "RGB" else img
+        img = rgb.quantize(colors=colors, method=Image.MEDIANCUT)
+        save_kwargs["optimize"] = bool(options.get("optimize", True))
+    elif fmt_key == "ico":
+        requested = options.get("sizes") or ICO_DEFAULT_SIZES
+        max_dim = max(img.size)
+        sizes = sorted({_clamp_num(s, 1, max_dim, 0) for s in requested if _clamp_num(s, 1, max_dim, 0)})
+        if not sizes:
+            sizes = [min(256, max_dim)]
+        save_kwargs["sizes"] = [(s, s) for s in sizes]
+    return img, save_kwargs
+
+
+@app.route("/export/<image_id>", methods=["POST"])
+def export_image(image_id):
+    payload = request.get_json(force=True) or {}
+    fmt_key = str(payload.get("format", "png")).lower()
+    fmt = EXPORT_FORMATS.get(fmt_key)
+    if fmt is None:
+        return jsonify(error=f"Unsupported export format: {fmt_key}"), 400
+
+    params = payload.get("params") or {}
+    options = payload.get("options") or {}
+    try:
+        img = process_image_object(current_source_image(image_id), params)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
+
+    img, save_kwargs = _prepare_export(img, fmt_key, options)
+
+    buf = io.BytesIO()
+    img.save(buf, format=fmt["pillow_format"], **save_kwargs)
+    buf.seek(0)
+    filename = f"edited-image.{fmt['ext']}"
+    return send_file(buf, mimetype=fmt["mimetype"], as_attachment=True, download_name=filename)
 
 
 @app.route("/download/<filename>")
