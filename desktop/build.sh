@@ -61,24 +61,10 @@ fi
 "$PYTHON" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip setuptools wheel
 
-# basicsr==1.4.2 (a dependency of realesrgan, pinned in requirements.txt) is
-# unmaintained and fails to build on Python 3.13 with "KeyError:
-# '__version__'" - see patch_basicsr_setup.py for why. Fetch its sdist,
-# patch the bug out, and install it up front so the main install below finds
-# it already satisfied instead of trying to build the broken version.
-BASICSR_VERSION="$(grep -oE '^basicsr==[A-Za-z0-9.]+' "$PARENT_DIR/requirements.txt" | cut -d= -f3)"
-if [ -n "$BASICSR_VERSION" ] && ! "$VENV_DIR/bin/pip" show basicsr 2>/dev/null | grep -qx "Version: $BASICSR_VERSION"; then
-    echo "Fetching and patching basicsr $BASICSR_VERSION for Python 3.13 compatibility..."
-    BASICSR_TMP_DIR="$(mktemp -d)"
-    BASICSR_SDIST_URL="$(curl -sL "https://pypi.org/pypi/basicsr/$BASICSR_VERSION/json" \
-        | "$VENV_DIR/bin/python" -c "import json, sys; d = json.load(sys.stdin); print(next(u['url'] for u in d['urls'] if u['packagetype'] == 'sdist'))")"
-    curl -sL "$BASICSR_SDIST_URL" -o "$BASICSR_TMP_DIR/basicsr.tar.gz"
-    tar xzf "$BASICSR_TMP_DIR/basicsr.tar.gz" -C "$BASICSR_TMP_DIR"
-    BASICSR_SRC_DIR="$(find "$BASICSR_TMP_DIR" -maxdepth 1 -type d -name 'basicsr-*')"
-    "$VENV_DIR/bin/python" "$SCRIPT_DIR/patch_basicsr_setup.py" "$BASICSR_SRC_DIR/setup.py"
-    "$VENV_DIR/bin/pip" install --quiet --no-build-isolation --no-deps "$BASICSR_SRC_DIR"
-    rm -rf "$BASICSR_TMP_DIR"
-fi
+# basicsr==1.4.2 fails to build on Python 3.13+; install a patched copy up
+# front so the main install below finds it already satisfied. See
+# install_patched_basicsr.py for details.
+"$VENV_DIR/bin/python" "$SCRIPT_DIR/install_patched_basicsr.py"
 
 "$VENV_DIR/bin/pip" install --quiet -r "$PARENT_DIR/requirements.txt" -r "$SCRIPT_DIR/requirements.txt"
 "$VENV_DIR/bin/python" "$SCRIPT_DIR/build.py"

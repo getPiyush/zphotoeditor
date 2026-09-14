@@ -37,9 +37,8 @@ operating system:
 5. To close the app, just close its window like any other program — there's
    no server to stop and no terminal to keep open.
 
-Don't have a built app yet? Anyone with the project's source code can create
-one for your operating system by running `desktop/build.sh` (macOS/Linux) or
-`desktop/build.cmd` (Windows) from the project folder.
+Don't have a built app yet? See [Build the Desktop App](#build-the-desktop-app)
+below.
 
 ## Setup (For Developers)
 
@@ -52,6 +51,145 @@ python app.py
 ```
 
 Then open http://127.0.0.1:5000 in a browser.
+
+## Build the Desktop App
+
+The desktop app is the same Flask app shown in a native window by
+[pywebview](https://pywebview.flowrl.com/) and packaged into a single file by
+[PyInstaller](https://pyinstaller.org/). The build scripts create their own
+virtual environment in `desktop/.build-venv/`, so they don't touch your
+developer `venv`.
+
+PyInstaller does not cross-compile. Each build only runs on the OS and CPU
+architecture it was built on, so to ship for macOS, Windows, and Linux, run
+the build once on a machine (or CI runner) of each.
+
+### What you need on every OS
+
+- Python 3.10 or newer, 64-bit. See the per-OS notes below for which versions work.
+- An internet connection. The first build downloads PyTorch and the other
+  dependencies, which is several GB.
+- Optional: run `python app.py` once before building so the Real-ESRGAN
+  weights are downloaded to `models/`. If `models/` has files in it, the build
+  bundles them into the app, so it works offline and doesn't download on first
+  launch.
+
+The finished app is written to `desktop/dist/`.
+
+### macOS
+
+1. Install Python 3 from [python.org](https://www.python.org/downloads/macos/)
+   or with `brew install python`. On Apple Silicon Macs the Python must be a
+   native **arm64** build: PyTorch no longer ships Intel (x86_64) macOS
+   packages, so an Intel Python running under Rosetta (for example Homebrew
+   installed under `/usr/local`) can't install it. The script picks a native
+   python.org install when it finds one, and stops with an explanation if the
+   only Python it finds runs under Rosetta.
+2. Build:
+
+   ```bash
+   cd photo-editor
+   ./desktop/build.sh
+   ```
+
+3. Run it by double-clicking `desktop/dist/ZPhotoEditor` (or the
+   `ZPhotoEditor.app` bundle, if one was created next to it), or from a
+   terminal:
+
+   ```bash
+   ./desktop/dist/ZPhotoEditor
+   ```
+
+   The app is unsigned. The first time you open it, right-click it, choose
+   **Open**, then confirm **Open**.
+
+### Windows
+
+1. Install Python from [python.org](https://www.python.org/downloads/windows/)
+   and tick **Add python.exe to PATH** in the installer.
+2. Build from Command Prompt:
+
+   ```bat
+   cd photo-editor
+   desktop\build.cmd
+   ```
+
+   The script uses the newest Python the `py` launcher finds. To build with a
+   specific version instead, run `set PY_PYTHON=3.12` (for example) first.
+3. Run it by double-clicking `desktop\dist\ZPhotoEditor.exe`, or:
+
+   ```bat
+   desktop\dist\ZPhotoEditor.exe
+   ```
+
+   If SmartScreen says "Windows protected your PC", click **More info**, then
+   **Run anyway**. The window uses the Microsoft Edge WebView2 runtime, which
+   is already on Windows 10 and 11. If it's missing, install it from
+   [Microsoft](https://developer.microsoft.com/microsoft-edge/webview2/).
+
+### Linux
+
+1. Install Python 3 with venv support. On Debian/Ubuntu:
+
+   ```bash
+   sudo apt install python3 python3-venv python3-dev
+   ```
+
+2. Build:
+
+   ```bash
+   cd photo-editor
+   ./desktop/build.sh
+   ```
+
+   On Linux, pywebview draws its window with Qt, so the build also installs
+   PyQt6 and Qt WebEngine from pip (`pywebview[qt]` in
+   `desktop/requirements.txt`). No system GTK packages are needed. A very
+   minimal desktop or server install may still be missing the shared graphics
+   libraries Qt loads (such as `libgl1`, `libnss3`, `libxkbcommon0`). If the
+   app exits with a Qt error, install the library the message names.
+3. Run it:
+
+   ```bash
+   chmod +x desktop/dist/ZPhotoEditor
+   ./desktop/dist/ZPhotoEditor
+   ```
+
+   You can also make it executable from your file manager (right-click →
+   Properties → Permissions → "Allow executing") and double-click it.
+
+### Run the desktop window without building
+
+To try the desktop window without packaging (quicker when you're changing
+the app), install both sets of requirements into your developer venv and
+start the wrapper directly:
+
+```bash
+source venv/bin/activate            # Windows: venv\Scripts\activate
+pip install -r requirements.txt -r desktop/requirements.txt
+python desktop/main.py
+```
+
+The desktop window doesn't use port 5000. Each launch gets a free port from
+the OS, so it can run next to `python app.py` or macOS AirPlay Receiver (both
+of which use 5000).
+
+### How the build handles basicsr
+
+`basicsr==1.4.2` (needed by Real-ESRGAN) is unmaintained and fails to install
+on Python 3.13+. Both build scripts run `desktop/install_patched_basicsr.py`
+first. It downloads basicsr's source from PyPI, applies
+`desktop/patch_basicsr_setup.py`, and installs the result, so the build works
+on any supported Python version on every OS. It skips this step when the
+pinned version is already installed in the build venv.
+
+### Troubleshooting
+
+- **To rebuild from scratch,** delete `desktop/.build-venv/`,
+  `desktop/build/`, `desktop/dist/`, and `desktop/*.spec`, then run the build
+  script again.
+- **Where your saved photos go:** see step 4 of
+  [Run as a Desktop App](#run-as-a-desktop-app-no-setup-required).
 
 ## Stop all Python instances
 

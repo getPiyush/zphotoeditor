@@ -6,13 +6,12 @@ browser tab. This is the only file that reaches into the parent project;
 zphotoeditor itself stays a normal, independently-runnable Flask app with
 no knowledge of this wrapper.
 """
-import socket
 import sys
 import threading
-import time
 from pathlib import Path
 
 import webview
+from werkzeug.serving import make_server
 
 PARENT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PARENT_DIR))
@@ -20,22 +19,18 @@ sys.path.insert(0, str(PARENT_DIR))
 import app as photoeditor  # noqa: E402 (import must follow the sys.path patch above)
 
 HOST = "127.0.0.1"
-PORT = 5000
 
 
-def _run_server() -> None:
-    photoeditor.app.run(host=HOST, port=PORT, debug=False, threaded=True, use_reloader=False)
-
-
-def _wait_for_server(timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((HOST, PORT), timeout=0.5):
-                return
-        except OSError:
-            time.sleep(0.2)
-    raise RuntimeError("zPhotoEditor server did not start in time")
+def _start_server():
+    # Port 0 lets the OS pick a free port. A fixed port (the dev server's
+    # 5000) collides with a dev server left running and, on macOS, with
+    # AirPlay Receiver - and a connect-based readiness check can't tell
+    # those apart from our own server, so the window would load the wrong
+    # page. The socket is bound before this returns, so the window can
+    # load the URL immediately with no readiness polling.
+    server = make_server(HOST, 0, photoeditor.app, threaded=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def main() -> None:
@@ -45,16 +40,16 @@ def main() -> None:
     # window is created.
     webview.settings["ALLOW_DOWNLOADS"] = True
 
-    threading.Thread(target=_run_server, daemon=True).start()
-    _wait_for_server()
+    server = _start_server()
     webview.create_window(
         "zPhotoEditor",
-        f"http://{HOST}:{PORT}",
+        f"http://{HOST}:{server.server_port}",
         width=1280,
         height=860,
         min_size=(960, 640),
     )
     webview.start()
+    server.shutdown()
 
 
 if __name__ == "__main__":

@@ -1,2 +1,5 @@
-pywebview>=5.1
+pywebview>=5.1; sys_platform != "linux"
+# On Linux pywebview needs a GUI toolkit; the Qt extra pulls in pip-installable
+# PyQt6 + QtWebEngine wheels, so the build venv doesn't depend on system GTK.
+pywebview[qt]>=5.1; sys_platform == "linux"
 pyinstaller>=6.6
