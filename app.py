@@ -49,7 +49,8 @@ DATA_DIR = _user_data_dir()
 UPLOAD_DIR = DATA_DIR / "uploads"
 SAVED_DIR = DATA_DIR / "saved"
 STEPS_DIR = DATA_DIR / "steps"
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp"}
+# Every format the editor can export (EXPORT_FORMATS below) can be imported too.
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif", "ico"}
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SAVED_DIR.mkdir(parents=True, exist_ok=True)
@@ -464,6 +465,37 @@ def normalize_orientation(img: Image.Image) -> Image.Image:
         exif.pop(274)
     corrected.info["exif"] = exif.tobytes() if exif else b""
     return corrected
+
+
+# Sample modes Pillow opens high-bit-depth files in (16-bit TIFF/PNG, 32-bit
+# float TIFF). convert("RGB") clips these to 0-255 instead of scaling them,
+# which turns a 16-bit photo almost entirely white and a 0-1 float one black.
+_HIGH_BIT_DEPTH_MODES = {"I", "I;16", "I;16L", "I;16B", "I;16N", "F"}
+
+
+def to_working_mode(img: Image.Image) -> Image.Image:
+    """Convert to RGB or RGBA, the only modes the editing pipeline handles.
+
+    Unlike a bare convert("RGB"), this keeps transparency (a GIF's transparent
+    palette index, grayscale+alpha) by going to RGBA, and rescales
+    high-bit-depth grayscale to 8 bits rather than letting Pillow clip it."""
+    if img.mode in ("RGB", "RGBA"):
+        return img
+    if img.mode in _HIGH_BIT_DEPTH_MODES:
+        arr = np.asarray(img, dtype=np.float64)
+        peak = arr.max() if arr.size else 0.0
+        if img.mode == "F":
+            # Float images are conventionally 0-1; otherwise assume 0-255.
+            if peak <= 1.0:
+                arr = arr * 255.0
+        elif img.mode.startswith("I;16") or peak > 255:
+            # 16-bit samples. A plain "I" image that never exceeds 255 is
+            # really 8-bit data and is left as is.
+            arr = arr / 257.0
+        gray = np.clip(np.rint(arr), 0, 255).astype(np.uint8)
+        return Image.fromarray(gray, "L").convert("RGB")
+    has_alpha = img.mode in ("RGBA", "RGBa", "LA", "La", "PA") or "transparency" in img.info
+    return img.convert("RGBA" if has_alpha else "RGB")
 
 
 def _select_realesrgan_device(torch_module):
@@ -975,7 +1007,7 @@ def apply_geometry_ops(img: Image.Image, params: dict) -> Image.Image:
 
 def process_image_object(img: Image.Image, params: dict, source_key=None) -> Image.Image:
     img = normalize_orientation(img)
-    img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
+    img = to_working_mode(img)
 
     # Built against the pre-geometry image, because that's the image the
     # selection's coordinates were drawn on (and the one a color-range op has
@@ -1093,7 +1125,9 @@ def current_source_image(image_id: str, steps=None) -> Image.Image:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Drives the file picker's filter, so it offers exactly what /upload accepts.
+    upload_accept = ",".join(f".{ext}" for ext in sorted(ALLOWED_EXTENSIONS))
+    return render_template("index.html", upload_accept=upload_accept)
 
 
 @app.errorhandler(413)
@@ -1111,7 +1145,8 @@ def upload():
     if not file or file.filename == "":
         return jsonify(error="No file provided"), 400
     if not allowed_file(file.filename):
-        return jsonify(error="Unsupported file type"), 400
+        supported = ", ".join(sorted(ext.upper() for ext in ALLOWED_EXTENSIONS))
+        return jsonify(error=f"Unsupported file type. Supported: {supported}"), 400
 
     clear_working_images()
 
@@ -1120,10 +1155,31 @@ def upload():
     dest = UPLOAD_DIR / f"{image_id}_original.{ext}"
     file.save(dest)
 
-    with Image.open(dest) as img:
-        corrected = normalize_orientation(img)
-        corrected.save(dest, format=img.format or "PNG", exif=b"")
-        width, height = corrected.size
+    # A file can carry a supported extension and still be unreadable -- corrupt,
+    # or a variant Pillow can't decode (some TIFF compressions, say). Report
+    # that instead of letting it surface as an HTML 500 the frontend can't parse.
+    # Multi-frame files (animated GIF, multi-page TIFF) import their first
+    # frame, and an ICO imports its largest icon.
+    try:
+        with Image.open(dest) as img:
+            corrected = normalize_orientation(img)
+            save_kwargs = {"exif": b""}
+            if img.format == "ICO":
+                # Pillow only writes icon sizes that fit inside the image on both
+                # axes, and its default sizes are all square -- so re-saving a
+                # non-square icon (say 128x96) would silently drop that largest
+                # entry, the one being edited. Keep exactly that size.
+                save_kwargs["sizes"] = [corrected.size]
+            corrected.save(dest, format=img.format or "PNG", **save_kwargs)
+            width, height = corrected.size
+    except (OSError, ValueError, SyntaxError) as exc:
+        dest.unlink(missing_ok=True)
+        # Pillow's messages embed the server-side upload path, so the details
+        # go to the log and the user gets a plain explanation.
+        app.logger.warning("Could not decode upload %r: %s", file.filename, exc)
+        return jsonify(
+            error="Could not read this image file. It may be corrupt, or use a variant of the format this editor can't decode."
+        ), 400
 
     HISTORY[image_id] = []
 
@@ -1219,8 +1275,7 @@ def start_enhance(image_id):
 
     def run():
         try:
-            base = current_source_image(image_id)
-            base = base.convert("RGB") if base.mode not in ("RGB", "RGBA") else base
+            base = to_working_mode(current_source_image(image_id))
             alpha = base.getchannel("A") if base.mode == "RGBA" else None
             rgb = np.array(base.convert("RGB"))
             output = _realesrgan_enhance(
@@ -1550,7 +1605,7 @@ def selection_mask_preview(image_id):
 
     img = current_source_image(image_id)
     img = normalize_orientation(img)
-    img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
+    img = to_working_mode(img)
     mask = _selection_mask_for(spec, img, source_key=source_signature(image_id))
     if mask is None:
         # Nothing selected (or everything is): no overlay to draw.
