@@ -27,9 +27,15 @@ if not defined PY (
 "%PY%" -m venv "%VENV_DIR%" || exit /b 1
 
 set "VPY=%VENV_DIR%\Scripts\python.exe"
-"%VPY%" -m pip install --quiet --upgrade pip
-"%VPY%" -m pip install --quiet -r "%PARENT_DIR%\requirements.txt" -r "%SCRIPT_DIR%requirements.txt"
-"%VPY%" "%SCRIPT_DIR%build.py"
+"%VPY%" -m pip install --quiet --upgrade pip setuptools wheel || exit /b 1
+
+REM basicsr==1.4.2 fails to build on Python 3.13+; install a patched copy up
+REM front so the main install below finds it already satisfied. See
+REM install_patched_basicsr.py for details.
+"%VPY%" "%SCRIPT_DIR%install_patched_basicsr.py" || exit /b 1
+
+"%VPY%" -m pip install --quiet -r "%PARENT_DIR%\requirements.txt" -r "%SCRIPT_DIR%requirements.txt" || exit /b 1
+"%VPY%" "%SCRIPT_DIR%build.py" || exit /b 1
 
 echo Done. Executable is in %SCRIPT_DIR%dist\
 endlocal
