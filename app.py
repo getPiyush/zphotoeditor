@@ -1,3 +1,4 @@
+import heapq
 import io
 import json
 import math
@@ -10,11 +11,12 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from flask import Flask, jsonify, request, render_template, send_file, abort
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 # Pillow's decompression-bomb guard (default ~89.5 megapixels) exists to
 # protect public-facing services from malicious uploads; this is a local,
@@ -136,6 +138,8 @@ def clear_working_images() -> None:
     HISTORY.clear()
     ACTIVE_HISTORY_COUNT.clear()
     _SOURCE_CACHE.clear()
+    _MASK_CACHE.clear()
+    _EDGE_COST_CACHE.clear()
 
 
 def add_history_step(image_id: str, params: dict, label: str) -> dict:
@@ -750,15 +754,197 @@ def apply_enhancement(img: Image.Image, algorithm: str, strength: float = 100) -
     return result
 
 
+# --- Selection masks ---------------------------------------------------------
+# A selection is stored as a *recipe* (a list of shape/brush/color ops), never
+# as a rasterized bitmap: the recipe is a few hundred bytes of JSON, so it
+# round-trips through history export/import like every other setting, and it
+# re-rasterizes correctly at whatever size the image happens to be when the
+# step is replayed. Coordinates are in source-image pixels of the image the
+# selection was drawn on, so the mask is built *before* the geometry ops
+# (viewport crop / rotate / flip / crop) and then put through those exact same
+# transforms alongside the image it masks.
+
+SELECTION_MAX_POINTS = 4000
+
+
+def _selection_points(op: dict) -> list[tuple[float, float]]:
+    points = []
+    raw = op.get("points")
+    if not isinstance(raw, list):
+        return []
+    for point in raw[:SELECTION_MAX_POINTS]:
+        try:
+            points.append((float(point[0]), float(point[1])))
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+    return points
+
+
+def _shape_selection_mask(op: dict, size: tuple) -> Optional[np.ndarray]:
+    """Rasterize one geometric selection op (rectangle, ellipse, lasso
+    polygon, or brush stroke) into a 0/255 mask the size of the image."""
+    kind = op.get("type")
+    layer = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(layer)
+
+    if kind in ("rect", "ellipse"):
+        limit = float(max(size)) * 4
+        x = _clamp_num(op.get("x", 0), -limit, limit, 0.0)
+        y = _clamp_num(op.get("y", 0), -limit, limit, 0.0)
+        w = _clamp_num(op.get("w", 0), 0.0, limit, 0.0)
+        h = _clamp_num(op.get("h", 0), 0.0, limit, 0.0)
+        if w < 1 or h < 1:
+            return None
+        box = (x, y, x + w - 1, y + h - 1)
+        (draw.rectangle if kind == "rect" else draw.ellipse)(box, fill=255)
+    elif kind in ("lasso", "polygon"):
+        points = _selection_points(op)
+        if len(points) < 3:
+            return None
+        draw.polygon(points, fill=255)
+    elif kind == "brush":
+        points = _selection_points(op)
+        if not points:
+            return None
+        radius = _clamp_num(op.get("radius", 20), 0.5, float(max(size)), 20.0)
+        if len(points) > 1:
+            # joint="curve" rounds the corners between segments; the explicit
+            # circles below round the two open ends of the stroke.
+            draw.line(points, fill=255, width=max(1, int(round(radius * 2))), joint="curve")
+        for x, y in (points[0], points[-1]):
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=255)
+    else:
+        return None
+
+    return np.asarray(layer)
+
+
+def _color_selection_mask(op: dict, img: Image.Image) -> Optional[np.ndarray]:
+    """Select every pixel whose color is within `tolerance` of a target color
+    (either given outright, or sampled from the image at x/y). With
+    `contiguous` set this behaves like a magic wand -- only the connected
+    region touching the sampled point is kept -- otherwise every matching
+    pixel anywhere in the image is selected."""
+    arr = np.asarray(img.convert("RGB"), dtype=np.float32)
+    height, width = arr.shape[:2]
+
+    rgb = op.get("rgb")
+    seed = None
+    if rgb and len(rgb) >= 3:
+        target = np.array([_clamp_num(channel, 0.0, 255.0, 0.0) for channel in rgb[:3]], dtype=np.float32)
+    else:
+        seed_x = int(_clamp_num(op.get("x", 0), 0, width - 1, 0))
+        seed_y = int(_clamp_num(op.get("y", 0), 0, height - 1, 0))
+        seed = (seed_x, seed_y)
+        target = arr[seed_y, seed_x]
+
+    # Tolerance is a 0-100 percentage of the maximum possible RGB distance so
+    # the slider means the same thing regardless of the colors involved.
+    tolerance = _clamp_num(op.get("tolerance", 20), 0.0, 100.0, 20.0) / 100.0
+    distance = np.sqrt(((arr - target) ** 2).sum(axis=2)) / (255.0 * math.sqrt(3))
+    mask = (distance <= tolerance).astype(np.uint8)
+
+    if op.get("contiguous"):
+        if seed is None:
+            return None
+        count, labels = cv2.connectedComponents(mask, connectivity=8)
+        seed_label = labels[seed[1], seed[0]]
+        if seed_label == 0:
+            return None
+        mask = (labels == seed_label).astype(np.uint8)
+
+    return mask * 255
+
+
+def build_selection_mask(spec: dict, img: Image.Image) -> Optional[Image.Image]:
+    """Turn a selection recipe into an "L" mask (255 = fully selected), or
+    None when the recipe selects everything -- in which case the caller can
+    skip masking altogether and apply the edit to the whole image."""
+    if not isinstance(spec, dict):
+        return None
+    ops = spec.get("ops")
+    if not isinstance(ops, list) or not ops:
+        return None
+
+    accumulated = np.zeros((img.height, img.width), dtype=np.uint8)
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        if op.get("type") == "color":
+            layer = _color_selection_mask(op, img)
+        else:
+            layer = _shape_selection_mask(op, img.size)
+        if layer is None:
+            continue
+        combine = op.get("op", "add")
+        if combine == "subtract":
+            accumulated = np.minimum(accumulated, 255 - layer)
+        elif combine == "intersect":
+            accumulated = np.minimum(accumulated, layer)
+        else:
+            accumulated = np.maximum(accumulated, layer)
+
+    if spec.get("invert"):
+        accumulated = 255 - accumulated
+
+    feather = _clamp_num(spec.get("feather", 0) or 0, 0.0, 200.0, 0.0)
+    if feather > 0:
+        accumulated = cv2.GaussianBlur(accumulated, (0, 0), feather)
+
+    if int(accumulated.min()) == 255:
+        return None
+    return Image.fromarray(accumulated, mode="L")
+
+
+# Rebuilding a color-range mask means a full-image pass, which would otherwise
+# be repeated on every debounced slider preview even though the selection
+# itself hasn't changed. Key the cache on the source image's history signature
+# plus the recipe, so it only misses when one of those actually changes.
+_MASK_CACHE: dict = {}
+_MASK_CACHE_LIMIT = 6
+
+
+def _selection_mask_for(spec: dict, img: Image.Image, source_key=None) -> Optional[Image.Image]:
+    if not isinstance(spec, dict) or not spec.get("ops"):
+        return None
+    if source_key is None:
+        return build_selection_mask(spec, img)
+
+    key = (source_key, json.dumps(spec, sort_keys=True, default=str), img.size)
+    if key in _MASK_CACHE:
+        return _MASK_CACHE[key]
+    mask = build_selection_mask(spec, img)
+    if len(_MASK_CACHE) >= _MASK_CACHE_LIMIT:
+        _MASK_CACHE.clear()
+    _MASK_CACHE[key] = mask
+    return mask
+
+
+def composite_selection(base: Image.Image, edited: Image.Image, mask: Image.Image) -> Image.Image:
+    """Blend the edited image back over the unedited one through the mask, so
+    only selected pixels keep the edit (partially, where the mask is
+    feathered)."""
+    if base.size != edited.size:
+        # A step that changed the canvas size can't be masked meaningfully;
+        # the caller has already decided such steps apply image-wide.
+        return edited
+    if base.mode != edited.mode:
+        base = base.convert(edited.mode)
+    if mask.size != edited.size:
+        mask = mask.resize(edited.size, Image.Resampling.BILINEAR)
+    return Image.composite(edited, base, mask)
+
+
 def process_image(source: Path, params: dict) -> Image.Image:
     with Image.open(source) as source_image:
         return process_image_object(source_image.copy(), params)
 
 
-def process_image_object(img: Image.Image, params: dict) -> Image.Image:
-    img = normalize_orientation(img)
-    img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
-
+def apply_geometry_ops(img: Image.Image, params: dict) -> Image.Image:
+    """The canvas-changing part of the pipeline: viewport crop, rotation,
+    flips and crop. Split out from `process_image_object` so a selection mask
+    can be run through the exact same transforms as the image it masks and
+    stay pixel-aligned with it."""
     # Live-preview-only viewport crop (distinct from `crop`, which permanently
     # crops the source on commit): restricts adjustment/filter processing to
     # whatever's currently visible on screen so dragging a slider stays fast
@@ -784,10 +970,32 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         x, y, w, h = crop["x"], crop["y"], crop["w"], crop["h"]
         img = img.crop((x, y, x + w, y + h))
 
+    return img
+
+
+def process_image_object(img: Image.Image, params: dict, source_key=None) -> Image.Image:
+    img = normalize_orientation(img)
+    img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
+
+    # Built against the pre-geometry image, because that's the image the
+    # selection's coordinates were drawn on (and the one a color-range op has
+    # to sample its target color from).
+    mask = _selection_mask_for(params.get("selection"), img, source_key)
+
+    img = apply_geometry_ops(img, params)
+    if mask is not None:
+        mask = apply_geometry_ops(mask, params)
+
     resize = params.get("resize")
     enhancement_algorithm = params.get("enhancement", "none")
     enhancement_strength = params.get("enhancement_strength", 100)
 
+    # `unmasked` is the state the pipeline branches from when a selection is
+    # active: everything applied after this point is blended back over it
+    # through the mask, so unselected pixels come out untouched. Geometry
+    # (crop/resize/rotate/flip) and Real-ESRGAN are snapshotted *after* they
+    # run, because they redefine the canvas itself and can't be confined to
+    # part of it.
     if enhancement_algorithm == "realesrgan_x4plus":
         # The network always upscales by a fixed 4x, so running it on an
         # already-resized image would blow the output past the requested
@@ -796,10 +1004,15 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         img = apply_enhancement(img, enhancement_algorithm, enhancement_strength)
         if resize and resize.get("w") and resize.get("h"):
             img = resize_image(img, (int(resize["w"]), int(resize["h"])))
+        unmasked = img.copy() if mask is not None else None
     else:
         if resize and resize.get("w") and resize.get("h"):
             img = resize_image(img, (int(resize["w"]), int(resize["h"])))
+        unmasked = img.copy() if mask is not None else None
         img = apply_enhancement(img, enhancement_algorithm, enhancement_strength)
+
+    if mask is not None and mask.size != img.size:
+        mask = mask.resize(img.size, Image.Resampling.BILINEAR)
 
     img = _run_tone_pipeline(img, params)
 
@@ -818,6 +1031,9 @@ def process_image_object(img: Image.Image, params: dict) -> Image.Image:
         isolation_tone = float(params.get("isolation_tone", 0.0))
         img = apply_color_isolation(img, isolation_hue_min, isolation_hue_max, isolation_min_saturation, isolation_tone)
 
+    if mask is not None:
+        img = composite_selection(unmasked, img, mask)
+
     preview = params.get("preview")
     if preview and preview.get("w") and preview.get("h"):
         max_w = int(preview["w"])
@@ -834,6 +1050,15 @@ def _replay(image: Image.Image, steps: list[dict], start: int, end: int) -> Imag
     for step in steps[start:end]:
         image = process_image_object(image, step.get("params", {}))
     return image
+
+
+def source_signature(image_id: str) -> tuple:
+    """Identifies the exact image `current_source_image` will return right
+    now. Used as a cache key for anything derived from that image (currently
+    the rasterized selection mask)."""
+    all_steps = HISTORY.get(image_id, [])
+    active = all_steps[:ACTIVE_HISTORY_COUNT.get(image_id, len(all_steps))]
+    return (image_id, tuple(step["id"] for step in active))
 
 
 def current_source_image(image_id: str, steps=None) -> Image.Image:
@@ -919,7 +1144,9 @@ def get_original(image_id):
 def process(image_id):
     params = request.get_json(force=True) or {}
     try:
-        img = process_image_object(current_source_image(image_id), params)
+        img = process_image_object(
+            current_source_image(image_id), params, source_key=source_signature(image_id)
+        )
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
 
@@ -949,7 +1176,9 @@ def commit(image_id):
     params.pop("preview_crop", None)  # never bake the live-preview viewport crop into a step
 
     try:
-        img = process_image_object(current_source_image(image_id), params)
+        img = process_image_object(
+            current_source_image(image_id), params, source_key=source_signature(image_id)
+        )
     except RuntimeError as exc:
         return jsonify(error=str(exc)), 503
     entry = _commit_history_step(image_id, img, params, label)
@@ -1063,6 +1292,344 @@ def finish_enhance(image_id, job_id):
         _ENHANCE_JOBS.pop(job_id, None)
 
     return jsonify(history=HISTORY[image_id], current=entry, width=width, height=height)
+
+
+def _marching_ants_overlay(arr: np.ndarray) -> np.ndarray:
+    """Draw a selection's boundary as a dashed light/dark outline on an
+    otherwise fully transparent RGBA layer.
+
+    The dashes are stepped along each traced contour rather than along the x/y
+    axes, because any axis-aligned stripe pattern goes solid on the edges that
+    happen to run parallel to it -- a rectangle would end up with two dashed
+    sides and two solid ones. `cv2.findContours` hands back the boundary
+    pixels already in order, so walking that list dashes by arc length and
+    every edge dashes the same way whatever its angle. Alternating white with
+    near-black (rather than one color) is what keeps the outline visible on
+    both a bright sky and a dark shadow."""
+    height, width = arr.shape[:2]
+    # Contours need a hard edge; a feathered mask is cut at its halfway point
+    # so the outline marks where the edit is at half strength.
+    binary = np.where(arr >= 128, 255, 0).astype(np.uint8)
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+
+    longest = max(height, width)
+    dash = max(3, round(longest / 110))
+    thickness = max(1, round(longest / 900))
+
+    light = np.zeros((height, width), dtype=np.uint8)
+    dark = np.zeros((height, width), dtype=np.uint8)
+    for contour in contours:
+        points = contour[:, 0, :]
+        on = ((np.arange(len(points)) // dash) % 2) == 0
+        light[points[on, 1], points[on, 0]] = 255
+        dark[points[~on, 1], points[~on, 0]] = 255
+
+    if thickness > 1:
+        kernel = np.ones((thickness, thickness), np.uint8)
+        light = cv2.dilate(light, kernel)
+        dark = cv2.dilate(dark, kernel)
+
+    overlay = np.zeros((height, width, 4), dtype=np.uint8)
+    overlay[dark > 0] = (17, 20, 26, 235)
+    overlay[light > 0] = (255, 255, 255, 235)  # light wins where dilation overlaps
+    return overlay
+
+
+# --- Edge snapping (magnetic lasso) ------------------------------------------
+# The lasso can pull itself onto the nearest strong edge while it's being
+# dragged, so tracing a subject doesn't depend on a steady hand. The snapping
+# is resolved live, as the path is drawn, and only the resulting points are
+# stored in the selection recipe -- the committed op is an ordinary polygon.
+# That matters for replay: a magnetic op that re-ran edge detection would snap
+# somewhere else once an earlier history step had changed the pixels under it.
+
+# Edge detection runs on a downscaled copy. A lasso is traced by hand against a
+# preview that is itself downscaled, so sub-pixel accuracy against the full
+# resolution buys nothing, while a shortest-path search over 12 megapixels of
+# nodes would take long enough to feel broken.
+EDGE_COST_MAX_SIDE = 2000
+# Floor under the measured "strong edge" magnitude, in Sobel units (a hard
+# step of one 8-bit level scores about 4). Without it, an image with no edges
+# at all -- fog, a blank wall -- normalizes its own noise to full strength and
+# the lasso snaps to grain.
+EDGE_MIN_STRENGTH = 40.0
+# Cost of moving one pixel through a perfectly flat area, on top of the
+# edge-derived cost. Without it the search has no reason to prefer a short path
+# and will happily detour across the image to ride a stronger edge.
+EDGE_LENGTH_PENALTY = 0.25
+# What an anchor "pays" to travel the full snap radius when it looks around
+# for an edge to sit on. Charged as a fraction of the distance travelled
+# relative to that radius rather than a flat rate per pixel, so widening the
+# radius actually widens the reach -- which is what the on-screen slider
+# promises. Below 1.0 so a clean edge anywhere in range still beats standing
+# still on flat ground; not far below, or an anchor will abandon the line the
+# hand drew for whatever edge happens to be strongest nearby.
+EDGE_ANCHOR_PULL = 0.6
+# A segment whose search corridor exceeds this many pixels falls back to a
+# straight line rather than stalling the drag.
+EDGE_MAX_NODES = 90000
+
+_EDGE_COST_CACHE: dict = {}
+_EDGE_COST_CACHE_LIMIT = 2
+
+# 8-connected neighbourhood with the true step length of each move, so a
+# diagonal is not treated as the same distance as an orthogonal step.
+_EDGE_NEIGHBORS = [
+    (-1, -1, math.sqrt(2)), (-1, 0, 1.0), (-1, 1, math.sqrt(2)),
+    (0, -1, 1.0), (0, 1, 1.0),
+    (1, -1, math.sqrt(2)), (1, 0, 1.0), (1, 1, math.sqrt(2)),
+]
+
+
+def _build_edge_cost(img: Image.Image) -> tuple:
+    """Return (cost, scale): a uint8 map where 0 marks the strongest edges and
+    255 flat areas, plus the factor mapping source pixels to cost-map pixels.
+
+    Inverting the gradient like this turns "follow the edge" into "take the
+    cheapest route", which is what lets an ordinary shortest-path search do the
+    snapping."""
+    scale = min(1.0, EDGE_COST_MAX_SIDE / max(img.width, img.height))
+    if scale < 1.0:
+        img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+                         Image.Resampling.BILINEAR)
+
+    # Per channel rather than on a grayscale copy: two colors can differ
+    # strongly and still convert to nearly the same luma (a mid green against a
+    # mid blue sky is the usual case), which would make a perfectly visible
+    # subject outline invisible to the search.
+    rgb = np.asarray(img.convert("RGB"), dtype=np.uint8)
+    # A light blur first: without it the search latches onto sensor noise and
+    # JPEG blocking instead of the actual subject outline.
+    rgb = cv2.GaussianBlur(rgb, (0, 0), 1.2)
+    channels = [
+        cv2.magnitude(
+            cv2.Sobel(rgb[..., i], cv2.CV_32F, 1, 0, ksize=3),
+            cv2.Sobel(rgb[..., i], cv2.CV_32F, 0, 1, ksize=3),
+        )
+        for i in range(3)
+    ]
+    gradient = np.maximum(np.maximum(channels[0], channels[1]), channels[2])
+    # What counts as "a strong edge here" has to be measured from the image,
+    # and it has to be measured from the top of the distribution: in a photo of
+    # one clean subject against plain sky, real edges are a fraction of a
+    # percent of the pixels, so anything as low as the 99th percentile is
+    # measuring sensor noise and would scale that noise up into a map of
+    # edges that aren't there. A high percentile rather than the maximum still
+    # keeps one blown specular highlight from scaling every real edge away.
+    strong = max(float(np.percentile(gradient, 99.9)), EDGE_MIN_STRENGTH)
+    normalized = np.clip(gradient / strong, 0.0, 1.0)
+    # Squared rather than linear: a merely decent edge should be a lot cheaper
+    # than flat ground, not proportionally cheaper, or the length penalty wins
+    # and the path shortcuts straight across any edge that isn't the sharpest
+    # in the photo.
+    cost = np.uint8(np.clip((1.0 - normalized) ** 2 * 255.0, 0, 255))
+    return cost, scale
+
+
+def _snap_endpoint(cost: np.ndarray, point: tuple, radius: int) -> tuple:
+    """Move one anchor onto the best edge pixel near it.
+
+    Without this the snapping is undone at every anchor: the path in between
+    rides the edge, but each segment still has to *end* wherever the cursor
+    happened to be, so the result is pulled back off the edge every few pixels.
+    Scoring by cost plus a distance penalty keeps an anchor from wandering off
+    to a stronger edge that belongs to something else."""
+    radius = max(1, radius)
+    height, width = cost.shape[:2]
+    left = max(0, point[0] - radius)
+    top = max(0, point[1] - radius)
+    right = min(width - 1, point[0] + radius)
+    bottom = min(height - 1, point[1] + radius)
+
+    window = cost[top:bottom + 1, left:right + 1].astype(np.float32) / 255.0
+    offsets_y, offsets_x = np.ogrid[top:bottom + 1, left:right + 1]
+    distance = np.sqrt((offsets_x - point[0]) ** 2 + (offsets_y - point[1]) ** 2)
+    best = np.argmin(window + EDGE_ANCHOR_PULL * (distance / radius))
+    offset_y, offset_x = np.unravel_index(best, window.shape)
+    return (int(left + offset_x), int(top + offset_y))
+
+
+def _edge_cost_for(image_id: str, source_key) -> tuple:
+    cached = _EDGE_COST_CACHE.get(source_key)
+    if cached is not None:
+        return cached
+    img = current_source_image(image_id)
+    img = normalize_orientation(img)
+    built = _build_edge_cost(img)
+    if len(_EDGE_COST_CACHE) >= _EDGE_COST_CACHE_LIMIT:
+        _EDGE_COST_CACHE.clear()
+    _EDGE_COST_CACHE[source_key] = built
+    return built
+
+
+def _snap_segment(cost: np.ndarray, start: tuple, end: tuple, margin: int) -> Optional[list]:
+    """Cheapest path from `start` to `end` through `cost`, searched inside a
+    corridor `margin` pixels wider than their bounding box. Returns the path as
+    a list of (x, y) in cost-map pixels, or None when the corridor is too large
+    to search in the time a mouse drag can afford."""
+    height, width = cost.shape[:2]
+    left = max(0, min(start[0], end[0]) - margin)
+    top = max(0, min(start[1], end[1]) - margin)
+    right = min(width - 1, max(start[0], end[0]) + margin)
+    bottom = min(height - 1, max(start[1], end[1]) + margin)
+    sub_w = right - left + 1
+    sub_h = bottom - top + 1
+    if sub_w < 1 or sub_h < 1 or sub_w * sub_h > EDGE_MAX_NODES:
+        return None
+
+    # Flat Python lists beat numpy here: the search touches one element at a
+    # time, and numpy's per-element scalar overhead dominates at that size.
+    weights = (cost[top:bottom + 1, left:right + 1].astype(np.float32) / 255.0).ravel().tolist()
+    node_count = sub_w * sub_h
+    distances = [math.inf] * node_count
+    previous = [-1] * node_count
+    settled = bytearray(node_count)
+
+    start_index = (start[1] - top) * sub_w + (start[0] - left)
+    end_index = (end[1] - top) * sub_w + (end[0] - left)
+    distances[start_index] = 0.0
+    queue = [(0.0, start_index)]
+
+    while queue:
+        distance, index = heapq.heappop(queue)
+        if settled[index]:
+            continue
+        settled[index] = 1
+        if index == end_index:
+            break
+        y, x = divmod(index, sub_w)
+        for dy, dx, step in _EDGE_NEIGHBORS:
+            ny = y + dy
+            nx = x + dx
+            if ny < 0 or ny >= sub_h or nx < 0 or nx >= sub_w:
+                continue
+            neighbor = ny * sub_w + nx
+            if settled[neighbor]:
+                continue
+            candidate = distance + (weights[neighbor] + EDGE_LENGTH_PENALTY) * step
+            if candidate < distances[neighbor]:
+                distances[neighbor] = candidate
+                previous[neighbor] = index
+                heapq.heappush(queue, (candidate, neighbor))
+
+    if not settled[end_index]:
+        return None
+
+    path = []
+    index = end_index
+    while index != -1:
+        y, x = divmod(index, sub_w)
+        path.append((x + left, y + top))
+        index = previous[index]
+    path.reverse()
+    return path
+
+
+def _simplify_path(path: list, tolerance: float = 1.2) -> list:
+    """Drop the points that sit on a straight run. A raw shortest path names
+    every pixel it crosses, which would push a full lasso past the selection's
+    point budget and bloat the history step for no change in shape."""
+    if len(path) < 3:
+        return path
+    contour = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
+    simplified = cv2.approxPolyDP(contour, tolerance, False)
+    return [(int(point[0][0]), int(point[0][1])) for point in simplified]
+
+
+@app.route("/selection/<image_id>/mask", methods=["POST"])
+def selection_mask_preview(image_id):
+    """Render the current selection recipe as a transparent overlay carrying
+    nothing but a marching-ants outline of its boundary, sized for the
+    on-screen preview. The selected pixels are left completely clear so the
+    edit being previewed inside them can be judged on its own. The browser
+    only has a downscaled copy of the photo, so rasterizing here is both the
+    only way to preview a color-range selection accurately and a guarantee
+    that what's outlined is exactly what will be edited."""
+    payload = request.get_json(force=True) or {}
+    spec = payload.get("selection") or {}
+
+    img = current_source_image(image_id)
+    img = normalize_orientation(img)
+    img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
+    mask = _selection_mask_for(spec, img, source_key=source_signature(image_id))
+    if mask is None:
+        # Nothing selected (or everything is): no overlay to draw.
+        return ("", 204)
+
+    coverage = float(np.asarray(mask, dtype=np.float32).mean() / 255.0)
+
+    preview = payload.get("preview") or {}
+    max_w = int(preview.get("w") or 0)
+    max_h = int(preview.get("h") or 0)
+    if max_w > 0 and max_h > 0:
+        scale = min(max_w / mask.width, max_h / mask.height, 1)
+        if scale < 1:
+            mask = mask.resize(
+                (max(1, round(mask.width * scale)), max(1, round(mask.height * scale))),
+                Image.Resampling.BILINEAR,
+            )
+
+    overlay = _marching_ants_overlay(np.asarray(mask))
+
+    buf = io.BytesIO()
+    Image.fromarray(overlay, mode="RGBA").save(buf, format="PNG")
+    buf.seek(0)
+    response = send_file(buf, mimetype="image/png")
+    response.headers["X-Selection-Coverage"] = f"{coverage:.4f}"
+    return response
+
+
+@app.route("/selection/<image_id>/snap", methods=["POST"])
+def selection_snap(image_id):
+    """Pull one freshly drawn lasso segment onto the nearest strong edge.
+
+    The browser calls this as the lasso is dragged, one short segment at a
+    time, and keeps whatever comes back. Snapping per segment (rather than for
+    the whole loop on release) is what keeps each search small enough to answer
+    while the mouse is still moving, and means the part of the path already
+    laid down never shifts under the cursor."""
+    payload = request.get_json(force=True) or {}
+    raw_points = payload.get("points")
+    if not isinstance(raw_points, list) or len(raw_points) < 2:
+        return jsonify(error="A segment needs at least two points"), 400
+
+    cost, scale = _edge_cost_for(image_id, source_signature(image_id))
+    height, width = cost.shape[:2]
+
+    def to_cost_space(point):
+        x = int(_clamp_num(float(point[0]) * scale, 0, width - 1, 0))
+        y = int(_clamp_num(float(point[1]) * scale, 0, height - 1, 0))
+        return (x, y)
+
+    try:
+        endpoints = [to_cost_space(point) for point in raw_points[:2]]
+    except (TypeError, ValueError, IndexError):
+        return jsonify(error="Malformed segment points"), 400
+
+    # The radius arrives in source pixels (the browser converts it from the
+    # on-screen slider), so it has to be scaled into cost-map space like the
+    # coordinates are.
+    radius = _clamp_num(payload.get("radius", 24), 2.0, 400.0, 24.0)
+    margin = max(2, int(round(radius * scale)))
+
+    # The far end is pulled onto an edge first so the snapping survives the
+    # anchor; the near end is already a previous segment's snapped anchor,
+    # except at the very start of a stroke, where the browser asks for it.
+    start = _snap_endpoint(cost, endpoints[0], margin) if payload.get("snap_start") else endpoints[0]
+    end = _snap_endpoint(cost, endpoints[1], margin)
+
+    path = _snap_segment(cost, start, end, margin)
+    if path is None:
+        # Too big a corridor, or no route: hand back the straight segment so
+        # the lasso keeps working instead of dropping the stroke.
+        return jsonify(points=[list(raw_points[0]), list(raw_points[1])], snapped=False)
+
+    path = _simplify_path(path)
+    inverse = 1.0 / scale
+    return jsonify(
+        points=[[round(x * inverse), round(y * inverse)] for x, y in path],
+        snapped=True,
+    )
 
 
 @app.route("/revert/<image_id>", methods=["POST"])

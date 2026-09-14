@@ -81,6 +81,27 @@ const applyIsolationBtn = document.getElementById("applyIsolationBtn");
 const resetIsolationBtn = document.getElementById("resetIsolationBtn");
 const isolationPanelItem = document.getElementById("isolationPanelItem");
 const isolationPendingIndicator = document.getElementById("isolationPendingIndicator");
+const selectionOverlay = document.getElementById("selectionOverlay");
+const selectionCanvas = document.getElementById("selectionCanvas");
+const selectionToolButtons = document.querySelectorAll(".selection-tool");
+const selectionMode = document.getElementById("selectionMode");
+const selectionBrushField = document.getElementById("selectionBrushField");
+const selectionBrushSize = document.getElementById("selectionBrushSize");
+const selectionSnapFields = document.getElementById("selectionSnapFields");
+const selectionSnapEdges = document.getElementById("selectionSnapEdges");
+const selectionSnapRadius = document.getElementById("selectionSnapRadius");
+const selectionColorFields = document.getElementById("selectionColorFields");
+const selectionTolerance = document.getElementById("selectionTolerance");
+const selectionContiguous = document.getElementById("selectionContiguous");
+const selectionFeather = document.getElementById("selectionFeather");
+const selectionInvert = document.getElementById("selectionInvert");
+const selectionShowOverlay = document.getElementById("selectionShowOverlay");
+const selectionSummary = document.getElementById("selectionSummary");
+const selectionHint = document.getElementById("selectionHint");
+const selectionUndoBtn = document.getElementById("selectionUndoBtn");
+const selectionClearBtn = document.getElementById("selectionClearBtn");
+const selectionPanelItem = document.getElementById("selectionPanelItem");
+const selectionPendingIndicator = document.getElementById("selectionPendingIndicator");
 const statusEl = document.getElementById("status");
 const historyList = document.getElementById("historyList");
 const historyBackBtn = document.getElementById("historyBackBtn");
@@ -181,6 +202,8 @@ let state = {
   panY: 0,
   actualSize: false,
   cropMode: "drag",
+  selectionTool: "none", // none | rect | ellipse | lasso | brush | color
+  selection: { ops: [] }, // the selection recipe sent to the server; see SELECTION_TOOLS
   history: [], // committed steps after the original: [{id, timestamp, label}]
   currentStepId: null, // null means the current source is the original
   sliderBaseline: neutralSliderValues(), // value already baked into the current source, per slider
@@ -248,6 +271,7 @@ function applyPreviewTransform() {
   preview.style.rotate = "0deg";
   preview.style.cursor = zoom > 1 && state.cropMode === "drag" ? "grab" : "default";
   zoomLevelEl.textContent = `${Math.round(zoom * 100)}%`;
+  syncSelectionLayers();
   // Zooming/panning changes what's visible, so any pending panel's live
   // preview needs to be re-cropped to the new viewport.
   scheduleLivePreviewUpdate();
@@ -546,7 +570,7 @@ async function updateLivePreviewOverlay() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      ...collectPendingParams(),
+      ...withSelection(collectPendingParams()),
       preview_crop: cropRect,
       preview: { w: Math.round(overlayWidth), h: Math.round(overlayHeight) },
     }),
@@ -567,6 +591,607 @@ async function updateLivePreviewOverlay() {
   previewCropOverlay.hidden = false;
   if (previousUrl) URL.revokeObjectURL(previousUrl);
 }
+
+// --- Selection --------------------------------------------------------------
+// A selection restricts every pixel-wise edit -- Light, Color, Grayscale,
+// Filters, Color Isolation, and the Enhancement filters -- to the pixels
+// inside it. It is stored as a *recipe* (an ordered list of shape / lasso /
+// brush / color-range ops, each combined into the running mask by add,
+// subtract or intersect) rather than as a bitmap, so it costs a few hundred
+// bytes in a history step, survives history export/import as plain JSON, and
+// re-rasterizes exactly when a step is replayed. Op coordinates are in source
+// image pixels, which is why any edit that redefines the pixel grid
+// (crop/resize/rotate/flip, or a jump through history) clears it.
+//
+// The server owns rasterization: it is the only side with the full-resolution
+// pixels a color-range op needs, and having one implementation means the
+// highlighted overlay is guaranteed to be the same mask that gets applied.
+
+const SELECTION_TOOL_HINTS = {
+  none: "Choose a tool, then draw on the photo. Adjustments will then only touch the selected pixels.",
+  rect: "Drag on the photo to select a rectangle.",
+  ellipse: "Drag on the photo to select an ellipse.",
+  lasso: "Drag a freehand loop around the area; it closes itself when you let go. With Snap to edges on, the path pulls onto the nearest strong edge as you draw.",
+  brush: "Drag to paint the selection. Use Subtract to paint parts of it away.",
+  color: "Click a pixel to select every similar color. Tolerance widens the match.",
+};
+
+// Rasterizing the overlay at the on-screen size would go soft as soon as the
+// user zooms in, so ask for a fixed generous size instead (the server never
+// upscales past the image's own resolution) and let the browser fit it to the
+// preview. A mask PNG at this size is only a few KB.
+const SELECTION_OVERLAY_SIZE = 1800;
+
+// Sampling every mousemove would send thousands of points to the server for
+// one brush stroke; a point every few CSS pixels traces the same path.
+const SELECTION_POINT_SPACING = 3;
+
+// How far (in screen pixels) the magnetic lasso lets the cursor run ahead
+// before it snaps that stretch and freezes it. Short segments keep each
+// shortest-path search small enough to answer mid-drag; long ones would both
+// lag and give the search room to wander onto the wrong edge.
+const MAGNETIC_STEP = 18;
+// The server ignores selection points past its own cap; stopping a little
+// short of it keeps a very long trace from silently losing its tail.
+const MAGNETIC_MAX_POINTS = 3000;
+
+let activeSelectionDraw = null;
+// Held while a magnetic lasso is finishing: its closing segments are still
+// being snapped over the network after the mouse button came up, and the path
+// has to stay on screen (and no new stroke may start) until that lands.
+let finalizingSelectionDraw = null;
+let selectionOverlayUrl = null;
+let selectionOverlayDebounce = null;
+let selectionOverlayRequestId = 0;
+
+function hasSelection() {
+  return state.selection.ops.length > 0;
+}
+
+function selectionSpec() {
+  return {
+    ops: state.selection.ops,
+    feather: parseFloat(selectionFeather.value) || 0,
+    invert: selectionInvert.checked,
+  };
+}
+
+// Attaches the active selection to a step's params. Only used for edits the
+// backend can actually confine to part of the image -- geometry steps and
+// Real-ESRGAN deliberately go through commitStep/commitGeometryStep without it.
+function withSelection(params) {
+  return hasSelection() ? { ...params, selection: selectionSpec() } : params;
+}
+
+function selectionLabel(label) {
+  return hasSelection() ? `${label} (selection)` : label;
+}
+
+// Crop/resize/rotate/flip move every pixel, so the selection's coordinates
+// would silently point at the wrong place afterwards.
+function commitGeometryStep(params, label, showModal = false) {
+  clearSelection("Selection cleared (the image geometry changed).");
+  return commitStep(params, label, showModal);
+}
+
+function setSelectionTool(tool) {
+  state.selectionTool = tool;
+  selectionToolButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.tool === tool));
+  selectionBrushField.hidden = tool !== "brush";
+  selectionSnapFields.hidden = tool !== "lasso";
+  selectionColorFields.hidden = tool !== "color";
+  selectionHint.textContent = SELECTION_TOOL_HINTS[tool] || SELECTION_TOOL_HINTS.none;
+  activeSelectionDraw = null;
+  drawPendingSelectionShape();
+  if (tool !== "none") {
+    // Drawing a selection and dragging out a crop box are both click-drags on
+    // the same image, so only one of them can be armed at a time.
+    setCropMode("drag");
+    cropBox.hidden = true;
+    preview.style.cursor = "crosshair";
+  } else {
+    preview.style.cursor = state.zoom > 1 && state.cropMode === "drag" ? "grab" : "default";
+  }
+}
+
+function resetSelectionControls() {
+  state.selection = { ops: [] };
+  state.selectionTool = "none";
+  selectionMode.value = "replace";
+  selectionBrushSize.value = "24";
+  selectionSnapEdges.checked = true;
+  selectionSnapRadius.value = "24";
+  selectionTolerance.value = "20";
+  selectionContiguous.checked = true;
+  selectionFeather.value = "0";
+  selectionInvert.checked = false;
+  selectionShowOverlay.checked = true;
+  document.querySelector('[data-out="selectionBrushSize"]').textContent = "24";
+  document.querySelector('[data-out="selectionSnapRadius"]').textContent = "24";
+  document.querySelector('[data-out="selectionTolerance"]').textContent = "20";
+  document.querySelector('[data-out="selectionFeather"]').textContent = "0";
+  setSelectionTool("none");
+  hideSelectionOverlay();
+  updateSelectionUI();
+}
+
+function clearSelection(message) {
+  const had = hasSelection();
+  state.selection = { ops: [] };
+  activeSelectionDraw = null;
+  hideSelectionOverlay();
+  drawPendingSelectionShape();
+  updateSelectionUI();
+  if (had) {
+    if (message) selectionSummary.textContent = message;
+    refreshLivePreviewOverlay();
+  }
+}
+
+function updateSelectionUI(coverage) {
+  const active = hasSelection();
+  selectionUndoBtn.disabled = !active;
+  selectionClearBtn.disabled = !active;
+  selectionPanelItem.classList.toggle("has-pending", active);
+  selectionPendingIndicator.hidden = !active;
+  if (!active) {
+    selectionSummary.textContent = "No selection — adjustments apply to the whole image.";
+    return;
+  }
+  const steps = `${state.selection.ops.length} step${state.selection.ops.length === 1 ? "" : "s"}`;
+  selectionSummary.textContent =
+    coverage === undefined
+      ? `Selection active (${steps}).`
+      : `Selection active: ${(coverage * 100).toFixed(1)}% of the image (${steps}).`;
+}
+
+// --- overlay ----------------------------------------------------------------
+// Both selection layers are absolutely positioned siblings of the preview
+// image rather than children of it, so they have to be re-pinned to its
+// bounding box (which already includes the zoom/pan transform) whenever that
+// box moves or changes size.
+function syncSelectionLayers() {
+  if (!state.imageId) return;
+  const wrapRect = imageWrap.getBoundingClientRect();
+  const previewRect = preview.getBoundingClientRect();
+  if (previewRect.width <= 0 || previewRect.height <= 0) return;
+
+  const left = previewRect.left - wrapRect.left;
+  const top = previewRect.top - wrapRect.top;
+  for (const layer of [selectionOverlay, selectionCanvas]) {
+    layer.style.left = `${left}px`;
+    layer.style.top = `${top}px`;
+    layer.style.width = `${previewRect.width}px`;
+    layer.style.height = `${previewRect.height}px`;
+  }
+
+  // Assigning width/height wipes the canvas, so only resize the backing store
+  // when it's actually the wrong size -- otherwise an in-progress stroke would
+  // vanish on every pointer move.
+  const ratio = window.devicePixelRatio || 1;
+  const backingWidth = Math.max(1, Math.round(previewRect.width * ratio));
+  const backingHeight = Math.max(1, Math.round(previewRect.height * ratio));
+  if (selectionCanvas.width !== backingWidth || selectionCanvas.height !== backingHeight) {
+    selectionCanvas.width = backingWidth;
+    selectionCanvas.height = backingHeight;
+    drawPendingSelectionShape();
+  }
+}
+
+function hideSelectionOverlay() {
+  clearTimeout(selectionOverlayDebounce);
+  selectionOverlay.hidden = true;
+  if (selectionOverlayUrl) {
+    URL.revokeObjectURL(selectionOverlayUrl);
+    selectionOverlayUrl = null;
+  }
+}
+
+function scheduleSelectionOverlay() {
+  clearTimeout(selectionOverlayDebounce);
+  selectionOverlayDebounce = setTimeout(refreshSelectionOverlay, 120);
+}
+
+async function refreshSelectionOverlay() {
+  if (!state.imageId || !hasSelection()) {
+    hideSelectionOverlay();
+    updateSelectionUI();
+    return;
+  }
+  if (!selectionShowOverlay.checked) {
+    selectionOverlay.hidden = true;
+    return;
+  }
+
+  const requestId = ++selectionOverlayRequestId;
+  const res = await fetch(`/selection/${state.imageId}/mask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      selection: selectionSpec(),
+      preview: { w: SELECTION_OVERLAY_SIZE, h: SELECTION_OVERLAY_SIZE },
+    }),
+  });
+  if (requestId !== selectionOverlayRequestId) return;
+  // 204 means the recipe ended up selecting the whole image (or nothing at
+  // all), so there's no meaningful region to outline.
+  if (res.status === 204 || !res.ok) {
+    hideSelectionOverlay();
+    updateSelectionUI();
+    return;
+  }
+
+  const coverage = parseFloat(res.headers.get("X-Selection-Coverage"));
+  const blob = await res.blob();
+  if (requestId !== selectionOverlayRequestId) return;
+  const nextUrl = URL.createObjectURL(blob);
+  const previousUrl = selectionOverlayUrl;
+  selectionOverlayUrl = nextUrl;
+  selectionOverlay.src = nextUrl;
+  selectionOverlay.hidden = false;
+  syncSelectionLayers();
+  if (previousUrl) URL.revokeObjectURL(previousUrl);
+  updateSelectionUI(Number.isFinite(coverage) ? coverage : undefined);
+}
+
+function onSelectionChanged() {
+  updateSelectionUI();
+  scheduleSelectionOverlay();
+  // Every pending panel's live preview now has to be re-rendered through the
+  // new mask.
+  refreshLivePreviewOverlay();
+}
+
+// --- drawing ----------------------------------------------------------------
+// Maps a pointer position to a pixel in the source image. The preview's own
+// bounding box already accounts for zoom, pan and the fit-to-pane scale, so
+// this stays correct at any zoom level.
+function pointerToImagePoint(e) {
+  const rect = preview.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || !state.naturalWidth) return null;
+  return {
+    x: clamp(((e.clientX - rect.left) / rect.width) * state.naturalWidth, 0, state.naturalWidth - 1),
+    y: clamp(((e.clientY - rect.top) / rect.height) * state.naturalHeight, 0, state.naturalHeight - 1),
+  };
+}
+
+function imageToCanvasScale() {
+  const rect = preview.getBoundingClientRect();
+  return state.naturalWidth ? rect.width / state.naturalWidth : 1;
+}
+
+// Draws only the shape currently being dragged. The committed selection is
+// the server-rendered overlay image underneath; this is just the immediate
+// feedback that would otherwise wait on a round trip.
+function drawPendingSelectionShape() {
+  const ctx = selectionCanvas.getContext("2d");
+  if (!ctx) return;
+  const ratio = window.devicePixelRatio || 1;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, selectionCanvas.width / ratio, selectionCanvas.height / ratio);
+
+  const draw = activeSelectionDraw || finalizingSelectionDraw;
+  if (!draw) {
+    selectionCanvas.hidden = true;
+    return;
+  }
+  selectionCanvas.hidden = false;
+
+  const scale = imageToCanvasScale();
+  const subtracting = selectionMode.value === "subtract";
+  const light = subtracting ? "rgba(255, 150, 150, 0.95)" : "rgba(255, 255, 255, 0.95)";
+
+  // Traces the shape twice: a solid dark line, then a dashed light one over
+  // it. That reproduces the alternating light/dark ants of the committed
+  // outline, and leaves the enclosed pixels untouched so the photo inside the
+  // shape stays visible while it's being dragged.
+  const strokeAnts = (path) => {
+    ctx.setLineDash([]);
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = "rgba(17, 20, 26, 0.85)";
+    path();
+    ctx.stroke();
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = light;
+    path();
+    ctx.stroke();
+  };
+
+  if (draw.type === "rect" || draw.type === "ellipse") {
+    const x = Math.min(draw.start.x, draw.current.x) * scale;
+    const y = Math.min(draw.start.y, draw.current.y) * scale;
+    const w = Math.abs(draw.current.x - draw.start.x) * scale;
+    const h = Math.abs(draw.current.y - draw.start.y) * scale;
+    strokeAnts(() => {
+      ctx.beginPath();
+      if (draw.type === "rect") ctx.rect(x, y, w, h);
+      else ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+    });
+    return;
+  }
+
+  if (!draw.points.length) return;
+  const tracePath = (close) => {
+    ctx.beginPath();
+    ctx.moveTo(draw.points[0].x * scale, draw.points[0].y * scale);
+    for (const point of draw.points.slice(1)) ctx.lineTo(point.x * scale, point.y * scale);
+    if (close) ctx.closePath();
+  };
+
+  if (draw.type === "lasso") {
+    // A magnetic lasso is drawn open, with a straight rubber band running to
+    // the cursor: that stretch hasn't been snapped yet and showing it closed
+    // would imply a boundary that isn't decided. A freehand lasso has no
+    // pending stretch, so it previews closed.
+    const live = draw === activeSelectionDraw && draw.magnetic;
+    strokeAnts(() => {
+      tracePath(false);
+      if (live) ctx.lineTo(draw.current.x * scale, draw.current.y * scale);
+      else ctx.closePath();
+    });
+    return;
+  }
+
+  // The brush is the one shape whose body has to be drawn rather than
+  // outlined: its width is the thing being chosen, and there's no other way to
+  // see where the stroke is landing. It only lives until the button is
+  // released, at which point the outline replaces it.
+  ctx.setLineDash([]);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = subtracting ? "rgba(255, 90, 90, 0.30)" : "rgba(255, 255, 255, 0.30)";
+  ctx.lineWidth = Math.max(1, draw.radius * 2 * scale);
+  tracePath(false);
+  ctx.stroke();
+}
+
+function beginSelectionDraw(e) {
+  if (finalizingSelectionDraw) return;
+  const point = pointerToImagePoint(e);
+  if (!point) return;
+  e.preventDefault();
+
+  if (state.selectionTool === "color") {
+    pushSelectionOp({
+      type: "color",
+      x: Math.round(point.x),
+      y: Math.round(point.y),
+      tolerance: parseFloat(selectionTolerance.value),
+      contiguous: selectionContiguous.checked,
+    });
+    return;
+  }
+
+  activeSelectionDraw = {
+    type: state.selectionTool,
+    start: point,
+    current: point,
+    points: [point],
+    // Brush size is a screen-space diameter, so convert it to source pixels;
+    // otherwise a stroke painted while zoomed in would come out far too wide.
+    radius: parseFloat(selectionBrushSize.value) / 2 / Math.max(imageToCanvasScale(), 0.0001),
+    magnetic: state.selectionTool === "lasso" && selectionSnapEdges.checked,
+    // Everything up to `anchor` has been snapped and is frozen; the stretch
+    // from there to the cursor is still a straight rubber band.
+    anchor: point,
+    snapping: false,
+  };
+  syncSelectionLayers();
+  drawPendingSelectionShape();
+}
+
+function continueSelectionDraw(e) {
+  const point = pointerToImagePoint(e);
+  if (!point) return;
+  activeSelectionDraw.current = point;
+
+  if (activeSelectionDraw.magnetic) {
+    advanceMagneticLasso(activeSelectionDraw);
+    drawPendingSelectionShape();
+    return;
+  }
+
+  if (activeSelectionDraw.type === "lasso" || activeSelectionDraw.type === "brush") {
+    const last = activeSelectionDraw.points[activeSelectionDraw.points.length - 1];
+    const spacing = SELECTION_POINT_SPACING / Math.max(imageToCanvasScale(), 0.0001);
+    if (Math.hypot(point.x - last.x, point.y - last.y) >= spacing) {
+      activeSelectionDraw.points.push(point);
+    }
+  }
+  drawPendingSelectionShape();
+}
+
+function finishSelectionDraw() {
+  const draw = activeSelectionDraw;
+  activeSelectionDraw = null;
+  if (draw && draw.magnetic) {
+    finishMagneticLasso(draw);
+    return;
+  }
+  drawPendingSelectionShape();
+  if (!draw) return;
+
+  if (draw.type === "rect" || draw.type === "ellipse") {
+    const x = Math.round(Math.min(draw.start.x, draw.current.x));
+    const y = Math.round(Math.min(draw.start.y, draw.current.y));
+    const w = Math.round(Math.abs(draw.current.x - draw.start.x));
+    const h = Math.round(Math.abs(draw.current.y - draw.start.y));
+    if (w < 2 || h < 2) return; // a stray click, not a drag
+    pushSelectionOp({ type: draw.type, x, y, w, h });
+    return;
+  }
+
+  const points = draw.points.map((point) => [Math.round(point.x), Math.round(point.y)]);
+  if (draw.type === "lasso") {
+    if (points.length < 3) return;
+    pushSelectionOp({ type: "lasso", points });
+    return;
+  }
+  pushSelectionOp({ type: "brush", points, radius: Math.max(0.5, draw.radius) });
+}
+
+// --- magnetic lasso ---------------------------------------------------------
+// The path is snapped a segment at a time, while the drag is still going: each
+// time the cursor gets MAGNETIC_STEP ahead of the last anchor, that stretch is
+// sent to the server, which returns it pulled onto the strongest nearby edge.
+// What comes back is frozen and never moves again, so the trace builds up
+// behind the cursor instead of rewriting itself. Only the resulting points are
+// kept -- the committed op is an ordinary `lasso` polygon, which is what keeps
+// a replayed history step from re-snapping against different pixels.
+
+function advanceMagneticLasso(draw) {
+  if (draw.snapping || draw.points.length >= MAGNETIC_MAX_POINTS) return;
+  const scale = Math.max(imageToCanvasScale(), 0.0001);
+  const step = MAGNETIC_STEP / scale;
+  if (Math.hypot(draw.current.x - draw.anchor.x, draw.current.y - draw.anchor.y) < step) return;
+  appendSnappedSegment(draw, draw.anchor, draw.current);
+}
+
+// The first anchor is wherever the button went down, which is as likely to be
+// off the edge as any other hand-placed point, so the opening segment asks the
+// server to pull it in too and the traced loop starts on the edge as well.
+function magneticSnapStart(draw) {
+  return draw.points.length === 1;
+}
+
+async function appendSnappedSegment(draw, from, to) {
+  draw.snapping = true;
+  const snapStart = magneticSnapStart(draw);
+  const scale = Math.max(imageToCanvasScale(), 0.0001);
+  try {
+    const res = await fetch(`/selection/${state.imageId}/snap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        points: [
+          [Math.round(from.x), Math.round(from.y)],
+          [Math.round(to.x), Math.round(to.y)],
+        ],
+        // The slider is in screen pixels so it means the same thing at any
+        // zoom; the server works in source pixels.
+        radius: parseFloat(selectionSnapRadius.value) / scale,
+        snap_start: snapStart,
+      }),
+    });
+    if (res.ok) {
+      const returned = (await res.json()).points;
+      // The reply opens on the segment's own start anchor rather than a new
+      // point -- except on the first segment, where the server was asked to
+      // move that anchor onto an edge and the path has to take it.
+      if (snapStart && returned.length) draw.points[0] = { x: returned[0][0], y: returned[0][1] };
+      for (const [x, y] of returned.slice(1)) draw.points.push({ x, y });
+    } else {
+      draw.points.push(to);
+    }
+  } catch {
+    // Snapping is an assist, not a requirement: if it fails, the segment stays
+    // exactly where it was drawn rather than the stroke being lost.
+    draw.points.push(to);
+  }
+  draw.anchor = draw.points[draw.points.length - 1];
+  draw.snapping = false;
+  drawPendingSelectionShape();
+}
+
+async function finishMagneticLasso(draw) {
+  // The stroke is done but two segments still have to be snapped over the
+  // network, so the path is parked here to stay on screen (and to block a new
+  // stroke from starting) until they land.
+  finalizingSelectionDraw = draw;
+  drawPendingSelectionShape();
+  // Bounded, not open-ended: a request that never settles must not leave the
+  // path parked on screen with every further stroke blocked behind it.
+  for (let waited = 0; draw.snapping && waited < 2000; waited += 20) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  await appendSnappedSegment(draw, draw.anchor, draw.current);
+  await appendSnappedSegment(draw, draw.anchor, draw.points[0]); // close the loop
+  finalizingSelectionDraw = null;
+  drawPendingSelectionShape();
+
+  const points = draw.points.map((point) => [Math.round(point.x), Math.round(point.y)]);
+  if (points.length < 3) return;
+  pushSelectionOp({ type: "lasso", points });
+}
+
+function pushSelectionOp(op) {
+  const mode = selectionMode.value;
+  // Subtracting from or intersecting with nothing would just leave nothing
+  // selected, which is never what the first stroke means.
+  if (mode === "replace" || !hasSelection()) {
+    state.selection.ops = [{ ...op, op: "add" }];
+  } else {
+    state.selection.ops = [...state.selection.ops, { ...op, op: mode }];
+  }
+  onSelectionChanged();
+}
+
+selectionToolButtons.forEach((btn) => {
+  btn.addEventListener("click", () => setSelectionTool(btn.dataset.tool));
+});
+
+selectionBrushSize.addEventListener("input", () => {
+  document.querySelector('[data-out="selectionBrushSize"]').textContent = selectionBrushSize.value;
+});
+
+selectionSnapRadius.addEventListener("input", () => {
+  document.querySelector('[data-out="selectionSnapRadius"]').textContent = selectionSnapRadius.value;
+});
+
+// Tolerance and contiguity retune the most recent color pick in place, so the
+// slider behaves like a live control on the wand instead of requiring a
+// clear-and-re-click for every attempt.
+function retuneLastColorOp() {
+  const ops = state.selection.ops;
+  const last = ops[ops.length - 1];
+  if (!last || last.type !== "color") return false;
+  ops[ops.length - 1] = {
+    ...last,
+    tolerance: parseFloat(selectionTolerance.value),
+    contiguous: selectionContiguous.checked,
+  };
+  onSelectionChanged();
+  return true;
+}
+
+selectionTolerance.addEventListener("input", () => {
+  document.querySelector('[data-out="selectionTolerance"]').textContent = selectionTolerance.value;
+  retuneLastColorOp();
+});
+selectionContiguous.addEventListener("change", retuneLastColorOp);
+
+selectionFeather.addEventListener("input", () => {
+  document.querySelector('[data-out="selectionFeather"]').textContent = selectionFeather.value;
+  if (hasSelection()) onSelectionChanged();
+});
+
+selectionInvert.addEventListener("change", () => {
+  if (hasSelection()) onSelectionChanged();
+});
+
+selectionShowOverlay.addEventListener("change", () => {
+  if (selectionShowOverlay.checked) refreshSelectionOverlay();
+  else selectionOverlay.hidden = true;
+});
+
+selectionUndoBtn.addEventListener("click", () => {
+  if (!hasSelection()) return;
+  state.selection.ops = state.selection.ops.slice(0, -1);
+  onSelectionChanged();
+});
+
+selectionClearBtn.addEventListener("click", () => clearSelection());
+
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (activeSelectionDraw) {
+    activeSelectionDraw = null;
+    drawPendingSelectionShape();
+  } else if (state.selectionTool !== "none") {
+    setSelectionTool("none");
+  }
+});
 
 async function commitStep(params, label, showModal = false) {
   if (!state.imageId) return;
@@ -610,6 +1235,9 @@ function updateHistoryTrackButtons() {
 }
 
 function applyHistoryResponse(data) {
+  // Any history jump can land on a differently sized/oriented image, which
+  // would leave the selection's coordinates pointing at the wrong pixels.
+  clearSelection("Selection cleared (the history changed).");
   state.history = data.history;
   state.currentStepId = data.current ? data.current.id : null;
   state.naturalWidth = data.width;
@@ -826,6 +1454,7 @@ function requestPreview() {
       if (state.zoom > 1) {
         applyPreviewTransform();
       }
+      syncSelectionLayers();
       setStatus("");
     };
   }, 150);
@@ -1026,7 +1655,7 @@ const PANELS = [
 
 function applyPanelGeneric(panel) {
   if (!state.imageId || !panel.isPending()) return;
-  commitStep(panel.collectParams(), panel.buildLabel(), true);
+  commitStep(withSelection(panel.collectParams()), selectionLabel(panel.buildLabel()), true);
   panel.afterApply();
   updatePanelButtons();
 }
@@ -1077,6 +1706,8 @@ fileInput.addEventListener("change", async () => {
     panY: 0,
     actualSize: false,
     cropMode: "drag",
+    selectionTool: "none",
+    selection: { ops: [] },
     history: [],
     currentStepId: null,
     sliderBaseline: neutralSliderValues(),
@@ -1089,6 +1720,7 @@ fileInput.addEventListener("change", async () => {
   resetGrayscaleControls();
   resetFilterControls();
   resetIsolationControls();
+  resetSelectionControls();
   hideCropOverlay();
   initialPreviewText.hidden = true;
   preview.hidden = false;
@@ -1136,7 +1768,18 @@ fileInput.addEventListener("change", async () => {
   historyResetBtn.disabled = false;
   importHistoryBtn.disabled = false;
   exportHistoryBtn.disabled = false;
+  selectionToolButtons.forEach((btn) => { btn.disabled = false; });
+  selectionMode.disabled = false;
+  selectionBrushSize.disabled = false;
+  selectionSnapEdges.disabled = false;
+  selectionSnapRadius.disabled = false;
+  selectionTolerance.disabled = false;
+  selectionContiguous.disabled = false;
+  selectionFeather.disabled = false;
+  selectionInvert.disabled = false;
+  selectionShowOverlay.disabled = false;
   updatePanelButtons();
+  updateSelectionUI();
   setStatus("");
 });
 
@@ -1160,6 +1803,7 @@ resetBtn.addEventListener("click", async () => {
   resetGrayscaleControls();
   resetFilterControls();
   resetIsolationControls();
+  resetSelectionControls();
   applyHistoryResponse(await res.json());
   state.historyUndo = [];
   state.historyRedo = [];
@@ -1174,22 +1818,28 @@ resetZoomBtn.addEventListener("click", resetZoomState);
 actualSizeBtn.addEventListener("click", showActualSize);
 rotateLeftBtn.addEventListener("click", () => {
   if (!state.imageId) return;
-  commitStep({ rotation: -90 }, "Rotate left");
+  commitGeometryStep({ rotation: -90 }, "Rotate left");
 });
 rotateRightBtn.addEventListener("click", () => {
   if (!state.imageId) return;
-  commitStep({ rotation: 90 }, "Rotate right");
+  commitGeometryStep({ rotation: 90 }, "Rotate right");
 });
 flipHorizontalBtn.addEventListener("click", () => {
   if (!state.imageId) return;
-  commitStep({ flip_h: true }, "Flip horizontal");
+  commitGeometryStep({ flip_h: true }, "Flip horizontal");
 });
 flipVerticalBtn.addEventListener("click", () => {
   if (!state.imageId) return;
-  commitStep({ flip_v: true }, "Flip vertical");
+  commitGeometryStep({ flip_v: true }, "Flip vertical");
 });
-cropDragBtn.addEventListener("click", () => setCropMode("drag"));
-cropSelectBtn.addEventListener("click", () => setCropMode("select"));
+cropDragBtn.addEventListener("click", () => {
+  setSelectionTool("none");
+  setCropMode("drag");
+});
+cropSelectBtn.addEventListener("click", () => {
+  setSelectionTool("none");
+  setCropMode("select");
+});
 
 imageWrap.addEventListener("wheel", (e) => {
   if (!state.imageId) return;
@@ -1204,6 +1854,7 @@ imageWrap.addEventListener("dragstart", (e) => e.preventDefault());
 window.addEventListener("resize", () => {
   if (!state.imageId) return;
   fitPreviewToPane();
+  syncSelectionLayers();
   if (state.zoom > 1) applyPreviewTransform();
   else scheduleLivePreviewUpdate();
 });
@@ -1354,6 +2005,11 @@ togglePanelBtn.addEventListener("click", () => {
 
 // --- Crop drag selection ---
 function handleCropPointerDown(e) {
+  if (state.imageId && state.selectionTool !== "none") {
+    beginSelectionDraw(e);
+    return;
+  }
+
   const handle = e.target.closest(".crop-handle");
   if (handle) {
     const current = cropBox.getBoundingClientRect();
@@ -1408,6 +2064,11 @@ function handleCropPointerDown(e) {
 }
 
 function handleCropPointerMove(e) {
+  if (activeSelectionDraw) {
+    continueSelectionDraw(e);
+    return;
+  }
+
   if (cropInteraction) {
     const rect = imageWrap.getBoundingClientRect();
     const dx = e.clientX - cropInteraction.startX;
@@ -1476,6 +2137,11 @@ function handleCropPointerMove(e) {
 }
 
 function handleCropPointerUp() {
+  if (activeSelectionDraw) {
+    finishSelectionDraw();
+    return;
+  }
+
   if (panStart) {
     panStart = null;
     preview.style.cursor = state.zoom > 1 ? "grab" : "default";
@@ -1521,7 +2187,7 @@ applyCropBtn.addEventListener("click", () => {
   state.aspectRatio = w / h;
   cropBox.hidden = true;
   resetZoomState();
-  commitStep({ crop: { x, y, w, h } }, `Crop ${w}×${h}`, true);
+  commitGeometryStep({ crop: { x, y, w, h } }, `Crop ${w}×${h}`, true);
 });
 
 clearCropBtn.addEventListener("click", () => {
@@ -1642,7 +2308,7 @@ applyResizeBtn.addEventListener("click", () => {
   const w = parseInt(resizeW.value, 10);
   const h = parseInt(resizeH.value, 10);
   if (!w || !h) return;
-  commitStep({ resize: { w, h } }, `Resize ${w}×${h}`, true);
+  commitGeometryStep({ resize: { w, h } }, `Resize ${w}×${h}`, true);
 });
 
 applyEnhancementBtn.addEventListener("click", () => {
@@ -1658,7 +2324,11 @@ applyEnhancementBtn.addEventListener("click", () => {
     // rather than also upscaling the output.
     runRealesrganEnhance(state.naturalWidth, state.naturalHeight, label);
   } else {
-    commitStep({ enhancement: algorithm, enhancement_strength: strength }, `${label} ${strength}%`, true);
+    commitStep(
+      withSelection({ enhancement: algorithm, enhancement_strength: strength }),
+      selectionLabel(`${label} ${strength}%`),
+      true
+    );
   }
   enhancement.value = "none";
   enhancementStrength.value = "100";

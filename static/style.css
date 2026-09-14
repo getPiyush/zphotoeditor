@@ -196,6 +196,24 @@ body {
 
 #previewCropOverlay[hidden] { display: none; }
 
+/* Both selection layers sit exactly on top of the preview image (their
+   left/top/width/height are recomputed from the preview's own bounding box
+   whenever zoom/pan/size changes), so a highlighted pixel lines up with the
+   pixel it stands for. #selectionOverlay is the server-rendered mask of what
+   is currently selected; #selectionCanvas is only used to draw the shape
+   being dragged right now. */
+#selectionOverlay,
+#selectionCanvas {
+  position: absolute;
+  border-radius: 4px;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+#selectionOverlay[hidden],
+#selectionCanvas[hidden] { display: none; }
+
 .initial-preview-text {
   position: absolute;
   top: 50%;
@@ -564,10 +582,37 @@ fieldset .btn { width: 100%; margin-top: 6px; }
   margin-bottom: 8px;
 }
 
-.crop-mode-controls .btn.active {
+.crop-mode-controls .btn.active,
+.selection-tools .btn.active {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* Six tools don't fit on one row in the panel's width, so they wrap into a
+   grid rather than being squeezed past the point of recognition. */
+.selection-tools {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.selection-tools .btn {
+  margin-top: 0;
+  min-width: 0;
+}
+
+.selection-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.selection-actions .btn {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
 }
 
 .zoom-level {
