@@ -289,18 +289,40 @@ function setCropMode(mode) {
   preview.style.cursor = state.zoom > 1 && isDrag ? "grab" : "default";
 }
 
+// Centers the preview in imageWrap by splitting the leftover space evenly
+// between the pan offsets. Centering goes through panX/panY rather than flexbox
+// alignment because zoom-at-point, panning, the crop box and the selection
+// layers all assume the image is laid out at imageWrap's top-left with a
+// `0 0` transform origin.
+function centerPreview() {
+  const wrapRect = imageWrap.getBoundingClientRect();
+  state.panX = Math.round((wrapRect.width - preview.offsetWidth * state.zoom) / 2);
+  state.panY = Math.round((wrapRect.height - preview.offsetHeight * state.zoom) / 2);
+}
+
+// While the view is still the fitted one (not zoomed, panned or at 1:1),
+// keeps it centered after the pane or the image changes size. Returns whether
+// it did, so callers can fall back to their own refresh otherwise.
+function recenterIfFitted() {
+  if (!state.fitted) return false;
+  centerPreview();
+  applyPreviewTransform();
+  return true;
+}
+
 function resetZoomState() {
   state.actualSize = false;
+  state.fitted = true;
   state.zoom = 1;
-  state.panX = 0;
-  state.panY = 0;
   fitPreviewToPane();
+  centerPreview();
   applyPreviewTransform();
 }
 
 function showActualSize() {
   if (!state.imageId || !state.naturalWidth || !state.naturalHeight) return;
   state.actualSize = true;
+  state.fitted = false;
   state.zoom = 1;
   state.panX = 0;
   state.panY = 0;
@@ -322,6 +344,7 @@ function zoomAtPoint(nextZoom, anchorX, anchorY) {
   state.panX = anchorX - ratio * (anchorX - state.panX);
   state.panY = anchorY - ratio * (anchorY - state.panY);
   state.zoom = clampedZoom;
+  state.fitted = false;
   applyPreviewTransform();
 }
 
@@ -1450,12 +1473,18 @@ function requestPreview() {
     const nextUrl = URL.createObjectURL(blob);
     preview.src = nextUrl;
     preview.onload = () => {
+      // Clear the status line before measuring: it sits under the pane, so
+      // clearing it resizes the pane. Doing that after fitting, in the same
+      // frame, would leave the image centered for the old pane height -- and
+      // the pane's ResizeObserver never sees a net size change to correct it.
+      setStatus("");
       fitPreviewToPane();
-      if (state.zoom > 1) {
+      // A crop, resize or rotate changes the image's shape, so a fitted view
+      // needs re-centering, not just re-sizing.
+      if (!recenterIfFitted() && state.zoom > 1) {
         applyPreviewTransform();
       }
       syncSelectionLayers();
-      setStatus("");
     };
   }, 150);
 }
@@ -1705,6 +1734,7 @@ fileInput.addEventListener("change", async () => {
     panX: 0,
     panY: 0,
     actualSize: false,
+    fitted: true,
     cropMode: "drag",
     selectionTool: "none",
     selection: { ops: [] },
@@ -1729,11 +1759,12 @@ fileInput.addEventListener("change", async () => {
   cropBox.hidden = true;
 
   setCropMode("drag");
-  resetZoomState();
   renderHistory();
   dropHint.hidden = true;
   imageWrap.hidden = false;
-  fitPreviewToPane();
+  // Only once imageWrap is visible: fitting and centering both measure it,
+  // and a hidden pane measures 0x0.
+  resetZoomState();
   requestPreview();
   resetBtn.disabled = false;
   exportBtn.disabled = false;
@@ -1851,13 +1882,17 @@ imageWrap.addEventListener("wheel", (e) => {
 
 imageWrap.addEventListener("dragstart", (e) => e.preventDefault());
 
-window.addEventListener("resize", () => {
-  if (!state.imageId) return;
+// Refits whenever the pane itself changes size. Watching the pane rather than
+// the window also catches layout changes around it -- the adjustments panel
+// collapsing, or other page content reflowing -- which fire no resize event.
+new ResizeObserver(() => {
+  if (!state.imageId || imageWrap.hidden) return;
   fitPreviewToPane();
+  if (recenterIfFitted()) return;
   syncSelectionLayers();
   if (state.zoom > 1) applyPreviewTransform();
   else scheduleLivePreviewUpdate();
-});
+}).observe(imageWrap);
 preview.addEventListener("dragstart", (e) => e.preventDefault());
 
 function closeExportDialog() {
@@ -1995,12 +2030,7 @@ togglePanelBtn.addEventListener("click", () => {
   togglePanelBtn.title = isCollapsed ? "Show adjustments panel" : "Hide adjustments panel";
   togglePanelBtn.setAttribute("aria-label", togglePanelBtn.title);
   togglePanelLabel.textContent = isCollapsed ? "Show panel" : "Hide panel";
-  requestAnimationFrame(() => {
-    if (!state.imageId) return;
-    fitPreviewToPane();
-    if (state.zoom > 1) applyPreviewTransform();
-    else scheduleLivePreviewUpdate();
-  });
+  // The pane's ResizeObserver refits the preview once the layout settles.
 });
 
 // --- Crop drag selection ---
@@ -2123,6 +2153,7 @@ function handleCropPointerMove(e) {
     const dy = e.clientY - panStart.y;
     state.panX = panStart.panX + dx;
     state.panY = panStart.panY + dy;
+    state.fitted = false;
     applyPreviewTransform();
     return;
   }

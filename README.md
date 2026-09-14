@@ -201,7 +201,15 @@ pkill -if 'python.*app.py' || true; pkill -if 'python -c .*import app' || true; 
 
 ## Usage
 
-1. Click **Upload photo** to select an image.
+1. Click **Upload photo** to select an image. You can import every format the
+   editor exports: PNG, JPEG (`.jpg`/`.jpeg`), WebP, TIFF (`.tif`/`.tiff`),
+   BMP, GIF, and ICO.
+   - An animated GIF or multi-page TIFF opens at its first frame, and an ICO
+     opens at its largest icon size.
+   - Transparency is kept, including a GIF's transparent color.
+   - 16-bit and floating-point TIFFs are scaled down to 8 bits per channel.
+   - A file that can't be decoded (corrupt, or an unusual TIFF compression) is
+     rejected with a message saying why.
 2. Use the sliders to adjust brightness, exposure, contrast, warmth, pop,
    vignette, and per-channel color balance (red/green/blue). Warmth ranges
    from cool to warm, Pop adds contrast and color, and Vignette darkens the
